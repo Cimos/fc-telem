@@ -5,7 +5,7 @@ Microsoft neural TTS (edge-tts) -> MP3 -> 32 kHz 16-bit mono PCM WAV, the format
 EdgeTX voice packs use. Silence is trimmed and each clip is normalised to the same
 peak, so they all sound alike on the radio.
 
-Usage: .venv/bin/python tools/make_voices.py [--voice en-AU-NatashaNeural]
+Usage: .venv/bin/python tools/make_voices.py [--voice en-AU-NatashaNeural] [--pitch -15Hz] [--rate +5%]
 Writes SOUNDS/en/fctel/<name>.wav; copy that folder to the radio's SD card.
 """
 import argparse, array, asyncio, io, wave
@@ -78,9 +78,9 @@ CLIPS = {
 }
 
 
-async def tts(text, voice):
+async def tts(text, voice, pitch="+0Hz", rate="+5%"):
     buf = bytearray()
-    async for chunk in edge_tts.Communicate(text, voice, rate="+5%").stream():
+    async for chunk in edge_tts.Communicate(text, voice, rate=rate, pitch=pitch).stream():
         if chunk["type"] == "audio":
             buf += chunk["data"]
     return bytes(buf)
@@ -109,10 +109,12 @@ def write_wav(path, pcm):
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--voice", default="en-AU-NatashaNeural")
+    ap.add_argument("--pitch", default="+0Hz", help="e.g. -15Hz for a deeper voice")
+    ap.add_argument("--rate", default="+5%", help="speaking speed, e.g. -5%%")
     a = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     for name, text in CLIPS.items():
-        pcm = to_pcm(await tts(text, a.voice))
+        pcm = to_pcm(await tts(text, a.voice, a.pitch, a.rate))
         write_wav(OUT / f"{name}.wav", pcm)
         print(f"{name:11s} {len(pcm)/RATE:4.2f}s  '{text}'")
 
