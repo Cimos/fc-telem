@@ -1,0 +1,394 @@
+-- MAD_CAPPY INAV telemetry for 128x64 EdgeTX radios.
+-- Values are in the units delivered by the named EdgeTX sensors.
+local CFG = {
+  capacity = 2200,       -- usable pack capacity, mAh
+  lqWarn = 70,           -- link-quality warning, percent
+  lqRepeat = 1000,       -- 10 ms ticks (10 seconds)
+  cellWarn = 3.50,       -- low-cell warning, volts
+  cellReady = 3.70,      -- minimum pre-flight cell voltage
+  batteryRepeat = 1000,  -- 10 ms ticks
+  reservePercent = 20,   -- capacity warning threshold
+  reserveRepeat = 2000,  -- 20 seconds
+  useWav = true,         -- false uses tones; missing WAVs also use tones
+}
+
+local floor, ceil, abs, sqrt = math.floor, math.ceil, math.abs, math.sqrt
+local sin, cos, pi = math.sin, math.cos, math.pi
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+local function band(a, b)
+  local r, p = 0, 1
+  while a > 0 and b > 0 do
+    local aa, bb = a % 2, b % 2
+    if aa == 1 and bb == 1 then r = r + p end
+    a, b, p = floor(a / 2), floor(b / 2), p * 2
+  end
+  return r
+end
+local function bxor(a, b)
+  local r, p = 0, 1
+  while a > 0 or b > 0 do
+    if a % 2 ~= b % 2 then r = r + p end
+    a, b, p = floor(a / 2), floor(b / 2), p * 2
+  end
+  return r
+end
+local function has(v, bit) return band(v or 0, 2 ^ bit) ~= 0 end
+local function u16(b, i) return (b[i] or 0) + 256 * (b[i + 1] or 0) end
+local function u32(b, i)
+  return u16(b, i) + 65536 * u16(b, i + 2)
+end
+
+local sensorNames = {"FM", "RxBt", "Curr", "Capa", "Bat%", "GPS", "GSpd",
+  "Hdg", "Alt", "Sats", "RQly", "1RSS", "RSNR", "TPWR", "VSpd"}
+local sid, val = {}, {}
+
+local modeLong = {
+  ACRO="ACRO", ANGL="ANGLE", HOR="HORIZON", ANGH="ANGLE HOLD",
+  MANU="MANUAL", AH="ALT HOLD", CRUZ="CRUISE", CRSH="COURSE HOLD",
+  LOTR="LOITER", HOLD="POS HOLD", WP="WAYPOINT", RTH="RTH",
+  WRTH="WP RTH", LAND="LANDING", ["!FS!"]="FAILSAFE", HRST="HOME RESET"
+}
+local reasonLong = {
+  ["!GPS"]="NO GPS FIX", ["!SW"]="ARM SWITCH ON", ["!THR"]="THROTTLE HIGH",
+  ["!STK"]="STICKS OFF CENTRE", ["!RC"]="NO RC LINK", ["!CAL"]="CALIBRATING",
+  ["!ACC"]="ACC NOT CAL", ["!MAG"]="MAG NOT CAL", ["!LVL"]="NOT LEVEL",
+  ["!NAV"]="NAV UNSAFE", ["!FS"]="FAILSAFE", ["!CLI"]="CLI OPEN",
+  ["!MNU"]="MENU OPEN", ["!PRE"]="NO PREARM", ["!TRM"]="AUTOTRIM",
+  ["!GEO"]="GEOZONE", ["!LND"]="LANDED", ["!DSB"]="DSHOT BEEPER",
+  ["!HW"]="HARDWARE", ["!SET"]="BAD SETTING", ["!PWM"]="PWM ERROR",
+  ["!MEM"]="LOW MEMORY", ["!OVL"]="CPU OVERLOAD", ["!ERR"]="ERROR"
+}
+local wavName = {
+  ACRO="acro", ANGLE="angle", HORIZON="horizon", ["ANGLE HOLD"]="anglehold",
+  MANUAL="manual", ["ALT HOLD"]="althold", CRUISE="cruise", ["COURSE HOLD"]="coursehold",
+  LOITER="loiter", ["POS HOLD"]="poshold", WAYPOINT="waypoint", RTH="rth",
+  ["WP RTH"]="wprth", LANDING="landing", FAILSAFE="failsafe", ["HOME RESET"]="homereset"
+}
+local flagReasons = {
+  {7,"FAILSAFE"}, {16,"FAILSAFE"}, {18,"NO RC LINK"}, {15,"HARDWARE"},
+  {26,"BAD SETTING"}, {27,"PWM ERROR"}, {25,"LOW MEMORY"}, {10,"CPU OVERLOAD"},
+  {14,"ARM SWITCH ON"}, {20,"CLI OPEN"}, {21,"MENU OPEN"}, {22,"MENU OPEN"},
+  {9,"CALIBRATING"}, {13,"ACC NOT CAL"}, {12,"MAG NOT CAL"}, {8,"NOT LEVEL"},
+  {11,"NAV UNSAFE"}, {6,"GEOZONE"}, {19,"THROTTLE HIGH"},
+  {23,"STICKS OFF CENTRE"}, {24,"AUTOTRIM"}, {28,"NO PREARM"},
+  {29,"DSHOT BEEPER"}, {30,"LANDED"}
+}
+
+local function decodeFM(s)
+  if type(s) ~= "string" or s == "" then return "UNKNOWN", "", false, false end
+  local reason = reasonLong[s]
+  if reason then return "BLOCKED", reason, false, true end
+  local ready = s:sub(-1) == "*"
+  local key = ready and s:sub(1, -2) or s
+  local known = modeLong[key]
+  return known or key, "", not ready and (known ~= nil or key:sub(1,1) ~= "!"), false
+end
+
+local function decodeFlags(flags)
+  local out, n = {}, 0
+  for i=1,#flagReasons do
+    if has(flags, flagReasons[i][1]) then
+      local text = flagReasons[i][2]
+      if n == 0 or out[n] ~= text then n = n + 1; out[n] = text end
+      if n == 3 then break end
+    end
+  end
+  return table.concat(out, ", ")
+end
+
+local function homeMath(lat1, lon1, lat2, lon2)
+  if not lat1 or not lon1 or not lat2 or not lon2 then return nil, nil end
+  local r = pi / 180
+  local y = (lat2 - lat1) * 111320
+  local x = (lon2 - lon1) * 111320 * cos((lat1 + lat2) * .5 * r)
+  local d = sqrt(x*x + y*y)
+  local brg = atan2(x, y) / r
+  if brg < 0 then brg = brg + 360 end
+  return d, brg
+end
+
+local function cellCount(v)
+  if type(v) ~= "number" or v < 3 then return 0 end
+  local n = ceil(v / 4.35)
+  if n < 1 then n = 1 elseif n > 12 then n = 12 end
+  if v / n < 3.0 then return 0 end
+  return n
+end
+
+-- MSP-over-CRSF -------------------------------------------------------------
+local MSP_REQ, MSP_RESP = 0x7A, 0x7B
+local FC, RADIO = 0xC8, 0xEA
+local commands = {0x2000, 107, 121}
+local txSeq, reqAt, reqIndex, waiting, lastReply = 0, 0, 0, nil, -100000
+local rx, rxSize, rxCmd, rxSeq, rxStarted = {}, 0, 0, 0, false
+local statusFlags, statusSeen, mspArmed, navMode, navState = 0, false, false, 0, 0
+local mspDistance, mspBearing
+
+local function encodeRequest(cmd, seq)
+  local p = {FC, RADIO}
+  if cmd >= 0x1000 then
+    p[3] = 0x50 + seq -- start + MSP v2
+    p[4], p[5], p[6], p[7], p[8] = 0, cmd % 256, floor(cmd/256), 0, 0
+  else
+    p[3], p[4], p[5] = 0x30 + seq, 0, cmd -- start + MSP v1
+    p[6] = bxor(0, cmd)
+  end
+  return p
+end
+
+local function sendRequest(cmd)
+  local p = encodeRequest(cmd, txSeq)
+  if crossfireTelemetryPush(MSP_REQ, p) then
+    txSeq = (txSeq + 1) % 16; waiting = cmd; reqAt = getTime()
+    rxStarted = false
+  end
+end
+
+local function parseReply(cmd, b)
+  if cmd == 0x2000 and #b >= 13 then
+    -- INAV 9.1.1 fc_msp.c MSP2_INAV_STATUS: u16 cycleTime, u16 i2cErrors,
+    -- u16 sensorStatus, u16 load, u8 profiles, then u32 armingFlags (offset 10),
+    -- then the box-mode bitmask and u8 mixer profile.
+    statusFlags = u32(b, 10); statusSeen = true
+    mspArmed = has(statusFlags, 2)
+  elseif cmd == 107 and #b >= 5 then
+    mspDistance, mspBearing = u16(b,1), u16(b,3)
+  elseif cmd == 121 and #b >= 7 then
+    navMode, navState = b[1] or 0, b[2] or 0
+  end
+end
+
+local function receiveChunk(p, now)
+  if type(p) ~= "table" or p[1] ~= RADIO or p[2] ~= FC or not p[3] then return false end
+  local st, i = p[3], 4
+  local seq, ver = band(st,15), floor(band(st,0x60)/32)
+  if band(st,0x10) ~= 0 then
+    rx, rxStarted, rxSeq = {}, true, seq
+    if ver == 1 then
+      rxSize, rxCmd, i = p[4] or 0, p[5] or 0, 6
+    elseif ver == 2 then
+      rxCmd, rxSize, i = u16(p,5), u16(p,7), 9
+    else rxStarted = false; return false end
+  elseif not rxStarted or seq ~= (rxSeq + 1) % 16 then
+    rxStarted = false; return false
+  else rxSeq = seq end
+  while i <= #p and #rx < rxSize do rx[#rx+1] = p[i]; i = i + 1 end
+  if #rx >= rxSize then
+    rxStarted = false; lastReply = now or getTime(); waiting = nil
+    parseReply(rxCmd, rx); return true
+  end
+  return false
+end
+
+local function pollMSP(now)
+  while true do
+    local typ, p = crossfireTelemetryPop()
+    if not typ then break end
+    if typ == MSP_RESP then receiveChunk(p, now) end
+  end
+  if waiting and now - reqAt > 100 then waiting = nil; rxStarted = false end
+  if not waiting and now - reqAt >= 50 then
+    reqIndex = reqIndex % #commands + 1; sendRequest(commands[reqIndex])
+  end
+end
+
+-- State and alerts ----------------------------------------------------------
+local page, cells, armed, prevArmed = 1, 0, false, false
+local mode, reason, blocked = "UNKNOWN", "", false
+local homeLat, homeLon, homeSet, distance, bearing = nil, nil, false, nil, nil
+local armedTicks, armTick, lastBg = 0, 0, 0
+local lastMode, lastReason = "", ""
+local lastLq, lastBat, lastReserve, lastRefused = -100000, -100000, -100000, -100000
+local startCapa, efficiency, flownKm = nil, nil, 0
+local lastLat, lastLon
+
+local function tone(kind)
+  if kind == "urgent" then playTone(1200,180,40); playHaptic(180,60)
+  elseif kind == "warn" then playTone(850,140,30)
+  else playTone(1800,100,20) end
+end
+local function sayMode(m, urgent)
+  local f = wavName[m]
+  local played = false
+  if CFG.useWav and f and io and io.open then
+    local h = io.open("/SOUNDS/en/inav/" .. f .. ".wav", "r")
+    if h then h:close(); playFile("/SOUNDS/en/inav/" .. f .. ".wav"); played = true end
+  end
+  if not played then tone(urgent and "urgent" or "mode")
+  elseif urgent then playHaptic(180,60) end
+end
+
+local function readSensors()
+  for i=1,#sensorNames do
+    local id = sid[i]
+    if id then
+      local v = getValue(id)
+      if v ~= nil then val[i] = v end
+    end
+  end
+end
+local function V(name)
+  for i=1,#sensorNames do if sensorNames[i] == name then return val[i] end end
+end
+
+local function updateState(now)
+  local fmMode, fmReason, fmArmed, fmBlocked = decodeFM(V("FM"))
+  local fresh = statusSeen and now - lastReply < 500
+  mode, reason, blocked = fmMode, fmReason, fmBlocked
+  armed = fresh and mspArmed or fmArmed
+  if fresh then
+    reason = decodeFlags(statusFlags); blocked = not armed and reason ~= ""
+    if navMode == 2 then mode = "RTH"
+    elseif navMode == 3 then mode = "WAYPOINT"
+    elseif navMode == 1 then mode = "POS HOLD"
+    elseif navMode == 15 then mode = "FAILSAFE" end
+  end
+  local gps = V("GPS")
+  if armed and not prevArmed then
+    armTick = now; startCapa = V("Capa") or 0; flownKm = 0
+    if type(gps)=="table" and gps.lat and gps.lon then
+      homeLat, homeLon, homeSet = gps.lat, gps.lon, true
+      lastLat, lastLon = gps.lat, gps.lon
+    end
+  elseif not armed and prevArmed then
+    armedTicks = armedTicks + now - armTick; lastLat, lastLon = nil, nil
+  elseif armed and type(gps)=="table" and gps.lat and gps.lon then
+    if lastLat then
+      local step = homeMath(lastLat,lastLon,gps.lat,gps.lon)
+      if step and step < 1000 then flownKm = flownKm + step/1000 end
+    end
+    lastLat, lastLon = gps.lat, gps.lon
+  end
+  prevArmed = armed
+  if armed then -- current flight time is accumulated only at display time
+  end
+  if fresh and mspDistance then distance, bearing, homeSet = mspDistance, mspBearing, true
+  elseif homeSet and type(gps)=="table" then distance, bearing = homeMath(gps.lat,gps.lon,homeLat,homeLon) end
+  local vb = V("RxBt")
+  if cells == 0 then cells = cellCount(vb) end
+  local capa = V("Capa") or 0
+  if flownKm > .1 and startCapa then
+    local used = capa - startCapa
+    if used > 20 then efficiency = used / flownKm end
+  end
+end
+
+local function doAlerts(now)
+  if armed and mode ~= lastMode and lastMode ~= "" then
+    sayMode(mode, mode == "RTH" or mode == "FAILSAFE")
+  end
+  if not armed and blocked and reason ~= lastReason and now-lastRefused >= 500 then
+    tone("urgent"); lastRefused = now
+  end
+  local lq = V("RQly")
+  if armed and type(lq)=="number" and lq < CFG.lqWarn and now-lastLq >= CFG.lqRepeat then tone("warn"); lastLq=now end
+  local vb = V("RxBt")
+  if armed and cells>0 and type(vb)=="number" and vb/cells < CFG.cellWarn and now-lastBat >= CFG.batteryRepeat then tone("warn"); lastBat=now end
+  local remain = CFG.capacity-(V("Capa") or 0)
+  if armed and remain < CFG.capacity*CFG.reservePercent/100 and now-lastReserve >= CFG.reserveRepeat then tone("warn"); lastReserve=now end
+  lastMode, lastReason = mode, reason
+end
+
+local function init()
+  for i=1,#sensorNames do
+    local f = getFieldInfo(sensorNames[i])
+    sid[i] = f and f.id or nil
+  end
+  lastBg = getTime(); reqAt = lastBg - 50
+end
+
+local function background()
+  local now = getTime()
+  readSensors(); pollMSP(now); updateState(now); doAlerts(now); lastBg = now
+end
+
+-- Display -------------------------------------------------------------------
+local Z, DBL, MID, INVBL = 0, DBLSIZE or 0, MIDSIZE or 0, (INVERS or 0)+(BLINK or 0)
+local function txt(x,y,s,f) lcd.drawText(x,y,tostring(s or "--"),f or Z) end
+local function num(v, decimals)
+  if type(v)~="number" then return "--" end
+  if decimals then return string.format("%.1f",v) end
+  return tostring(floor(v+.5))
+end
+local function arrow(x,y,a)
+  local r=(a or 0)*pi/180; local sx,sy=sin(r),-cos(r)
+  local px,py=-sy,sx
+  lcd.drawLine(x+floor(sx*6),y+floor(sy*6),x+floor(-sx*4+px*3),y+floor(-sy*4+py*3),SOLID or 0,Z)
+  lcd.drawLine(x+floor(sx*6),y+floor(sy*6),x+floor(-sx*4-px*3),y+floor(-sy*4-py*3),SOLID or 0,Z)
+  lcd.drawLine(x+floor(-sx*4+px*3),y+floor(-sy*4+py*3),x+floor(-sx*4-px*3),y+floor(-sy*4-py*3),SOLID or 0,Z)
+end
+local function flightSeconds(now)
+  return floor((armedTicks + (armed and now-armTick or 0))/100)
+end
+local function timerText(s)
+  local m=floor(s/60); return string.format("%02d:%02d",m,s-m*60)
+end
+local function activeWarning()
+  local lq, vb = V("RQly"), V("RxBt")
+  if mode=="FAILSAFE" then return "FAILSAFE" end
+  if type(lq)=="number" and lq<CFG.lqWarn then return "LOW LINK" end
+  if cells>0 and type(vb)=="number" and vb/cells<CFG.cellWarn then return "LOW BATTERY" end
+  return nil
+end
+
+local function drawMain(now)
+  local mf = (#mode > 10) and MID or DBL
+  txt(0,0,mode,mf); txt(94,0,num(V("RxBt"),true).."V"); txt(96,7,num(V("Curr"),true).."A")
+  txt(0,16,armed and "ARMED" or (blocked and "BLOCKED" or "READY"),armed and INVERS or Z)
+  txt(48,16,"SAT "..num(V("Sats"))..((V("Sats") or 0)>=6 and "+" or "-")); txt(96,16,"LQ"..num(V("RQly")))
+  txt(0,25,"ALT "..num(V("Alt")).."m"); txt(65,25,"SPD "..num(V("GSpd")))
+  txt(0,34,"HOME "..num(distance).."m")
+  local hdg=V("Hdg") or 0; arrow(115,37,((bearing or hdg)-hdg)%360)
+  local used=V("Capa") or 0; txt(0,43,"USED "..num(used).."mAh"); txt(75,43,"LEFT "..num(math.max(0,CFG.capacity-used)))
+  txt(0,55,timerText(flightSeconds(now)),INVERS)
+  local w = armed and activeWarning() or (blocked and reason or nil)
+  if w then txt(39,55,w,INVBL) else txt(74,55,"MAD_CAPPY") end
+end
+
+local function drawLink()
+  local vb, used = V("RxBt"), V("Capa") or 0
+  local pc = cells>0 and vb/cells or nil
+  txt(0,0,"LINK + BATTERY",INVERS)
+  txt(0,9,"RSSI "..num(V("1RSS")).." dBm"); txt(68,9,"SNR "..num(V("RSNR")))
+  txt(0,18,"LQ "..num(V("RQly")).."%"); txt(68,18,"PWR "..num(V("TPWR")).."mW")
+  txt(0,27,"PACK "..num(vb,true).."V"); txt(68,27,(cells>0 and (cells.."S ") or "")..num(pc,true).."V")
+  txt(0,36,"USED "..num(used)); txt(68,36,"LEFT "..num(math.max(0,CFG.capacity-used)))
+  local range = efficiency and math.max(0,CFG.capacity-used)/efficiency or nil
+  txt(0,45,"EFF "..num(efficiency).."mAh/km"); txt(0,54,"RANGE "..num(range,true).."km")
+  txt(85,54,"VS "..num(V("VSpd"),true))
+end
+
+local function checklistRow(y,label,ok,fail)
+  txt(0,y,label); txt(91,y,ok and "OK" or fail,ok and INVERS or Z)
+end
+local function isNavMode(m)
+  return m=="ALT HOLD" or m=="CRUISE" or m=="COURSE HOLD" or m=="LOITER" or m=="POS HOLD" or m=="WAYPOINT" or m=="RTH" or m=="WP RTH" or m=="LANDING"
+end
+local function drawChecklist()
+  local sats=V("Sats") or 0; local vb=V("RxBt"); local lq=V("RQly") or 0
+  local gps=sats>=6; local bat=cells>0 and type(vb)=="number" and vb/cells>=CFG.cellReady
+  local link=lq>=90; local modeok=not isNavMode(mode); local armok=not blocked
+  local all=gps and homeSet and bat and link and modeok and armok
+  txt(0,0,all and "READY TO FLY" or "PRE-FLIGHT",INVERS)
+  checklistRow(9,"GPS FIX",gps,"NO FIX"); checklistRow(18,"HOME",homeSet,"NOT SET")
+  checklistRow(27,"BATTERY",bat,"LOW"); checklistRow(36,"LINK",link,"WEAK")
+  checklistRow(45,"MODE",modeok,"NAV ON"); checklistRow(54,"ARMING",armok,reason~="" and reason or "BLOCKED")
+end
+
+local function run(event)
+  background()
+  local nextPage = rawget(_G,"EVT_VIRTUAL_NEXT_PAGE")
+  local prevPage = rawget(_G,"EVT_VIRTUAL_PREV_PAGE")
+  local enter = rawget(_G,"EVT_VIRTUAL_ENTER") or rawget(_G,"EVT_ENTER_BREAK") or rawget(_G,"EVT_ENTER_FIRST")
+  if event and (event==nextPage or event==enter) then page=page%3+1
+  elseif event and event==prevPage then page=(page+1)%3+1 end
+  lcd.clear()
+  if page==1 then drawMain(getTime()) elseif page==2 then drawLink() else drawChecklist() end
+  return 0
+end
+
+return {init=init,run=run,background=background,
+  _test={decodeFM=decodeFM,encodeRequest=encodeRequest,receiveChunk=receiveChunk,
+    decodeFlags=decodeFlags,homeMath=homeMath,cellCount=cellCount,getPage=function() return page end,
+    getReply=function() return rxCmd,rx end,
+    getStatus=function() return statusFlags,mspArmed end}}
