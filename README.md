@@ -92,8 +92,7 @@ With the console running:
 
 Updater destinations are restricted to the core path, a simple filename below
 `/SCRIPTS/FCTEL/`, or a simple WAV filename below `/SOUNDS/en/fctel/`. Data is
-written to `<destination>.tmp`, checksum-checked, then copied into place. Select
-the model again (or restart the radio) after replacing Lua files.
+written to `<destination>.tmp`, checksum-checked, then copied into place. Power-cycle the radio after replacing Lua files; re-selecting the active model does not reload them.
 
 ## Tests and memory
 

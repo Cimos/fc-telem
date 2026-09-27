@@ -413,7 +413,7 @@ local function upStep()
     if d and #d > 0 then io.write(up.dst, d); up.copied = up.copied + #d end
     if not d or #d < 512 then
       io.close(up.src); io.close(up.dst)
-      ulog("UDONE " .. up.copied .. " (select the model again to run it)"); up = nil
+      ulog("UDONE " .. up.copied .. " (power-cycle the radio to run it)"); up = nil
     end
   end
 end
