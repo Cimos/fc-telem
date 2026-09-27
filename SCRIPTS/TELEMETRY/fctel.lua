@@ -380,13 +380,21 @@ local function upStart(size, sum, path)
   if not validPath(path) then ulog("UERR path"); return end
   local tmp=path..".tmp"; local fh = io.open(tmp, "w")
   if not fh then ulog("UERR open"); return end
-  up = {size=size,sum=sum,got=0,acc=0,fh=fh,phase=1,tmp=tmp,dstPath=path}
+  up = {size=size,sum=sum,got=0,acc=0,fh=fh,phase=1,tmp=tmp,dstPath=path,last=getTime()}
   ulog("UOK " .. size)
 end
 local function upStep()
   if up.phase == 1 then
     local ok, c = pcall(serialRead, 128)
-    if not ok or type(c) ~= "string" or #c == 0 then return end
+    if not ok or type(c) ~= "string" or #c == 0 then
+      -- Abandon a transfer that stalls for 5 s, so the script is never left
+      -- swallowing serial input as file data. The target file is untouched.
+      if getTime() - up.last > 500 then
+        io.close(up.fh); ulog("UERR timeout at " .. up.got); up = nil
+      end
+      return
+    end
+    up.last = getTime()
     local need = up.size - up.got
     if #c > need then c = ssub(c, 1, need) end
     io.write(up.fh, c)

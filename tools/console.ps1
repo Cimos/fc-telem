@@ -28,34 +28,51 @@ Write-Output "PORT $Port"
 $sp = New-Object System.IO.Ports.SerialPort $Port, 115200
 $sp.DtrEnable = $true; $sp.ReadTimeout = 200; $sp.NewLine = "`n"; $sp.Open()
 function Stamp { (Get-Date).ToString("HH:mm:ss.fff") }
-# Read lines until one matches $pattern or $secs pass. Prints everything it reads.
+# Print straight to stdout. Inside a function, Write-Output would become part of the
+# function's return value instead of reaching the console.
+function Say([string]$text) { [Console]::Out.WriteLine($text); [Console]::Out.Flush() }
+# Read lines until one matches $pattern or $secs pass. Prints everything it reads and
+# returns only the matching line (or $null).
 function Wait-Line([string]$pattern, [double]$secs) {
   $until = (Get-Date).AddSeconds($secs)
   while ((Get-Date) -lt $until) {
     try { $l = $sp.ReadLine().TrimEnd("`r") } catch [System.TimeoutException] { continue }
-    if ($l) { Write-Output ((Stamp) + " " + $l); if ($l -match $pattern) { return $l } }
+    if ($l) { Say ((Stamp) + " " + $l); if ([regex]::IsMatch($l, $pattern)) { return $l } }
   }
   return $null
 }
-# Send a file to the script's updater: "U size sum", then 128-byte chunks, each acked.
-function Push-File([string]$path, [string]$destination = "/SCRIPTS/TELEMETRY/fctel.lua") {
-  $bytes = [System.IO.File]::ReadAllBytes($path); $sum = 0
-  foreach ($b in $bytes) { $sum = ($sum + $b) % 65536 }
-  Write-Output ((Stamp) + " >> PUSH $path $($bytes.Length) bytes sum $sum")
-  $sp.Write("U $($bytes.Length) $sum $destination`n")
-  if (-not (Wait-Line '^UOK' 4)) { Write-Output ((Stamp) + " PUSHFAIL no UOK"); return }
-  for ($off = 0; $off -lt $bytes.Length; $off += 128) {
+# Send bytes [offset..end) in 128-byte chunks, each acked with "UACK <bytes so far>".
+function Send-Body([byte[]]$bytes, [int]$offset) {
+  for ($off = $offset; $off -lt $bytes.Length; $off += 128) {
     $n = [Math]::Min(128, $bytes.Length - $off); $sp.Write($bytes, $off, $n); $want = $off + $n
     $ok = $false; $until = (Get-Date).AddSeconds(4)
     while (-not $ok -and (Get-Date) -lt $until) {
       $l = Wait-Line '^(UACK|UERR)' 1
-      if ($l -match '^UERR') { Write-Output ((Stamp) + " PUSHFAIL $l"); return }
-      if ($l -match '^UACK (\d+)' -and [int]$Matches[1] -ge $want) { $ok = $true }
+      if ($l -and $l.StartsWith("UERR")) { Say ((Stamp) + " PUSHFAIL " + $l); return $false }
+      $m = if ($l) { [regex]::Match($l, '^UACK (\d+)') } else { $null }
+      if ($m -and $m.Success -and [int]$m.Groups[1].Value -ge $want) { $ok = $true }
     }
-    if (-not $ok) { Write-Output ((Stamp) + " PUSHFAIL no ack at $want"); return }
+    if (-not $ok) { Say ((Stamp) + " PUSHFAIL no ack at " + $want); return $false }
   }
-  $end = Wait-Line '^(UDONE|UERR)' 8
-  if ($end -match '^UDONE') { Write-Output ((Stamp) + " PUSHOK") } else { Write-Output ((Stamp) + " PUSHFAIL end=$end") }
+  $fin = Wait-Line '^(UDONE|UERR)' 8
+  if ($fin -and $fin.StartsWith("UDONE")) { Say ((Stamp) + " PUSHOK"); return $true }
+  Say ((Stamp) + " PUSHFAIL end=" + $fin); return $false
+}
+# Send a file to the script's updater: "U size sum [path]", then the body.
+function Push-File([string]$path, [string]$destination) {
+  if (-not $destination) { $destination = "/SCRIPTS/TELEMETRY/fctel.lua" }
+  $bytes = [System.IO.File]::ReadAllBytes($path); $sum = 0
+  foreach ($b in $bytes) { $sum = ($sum + $b) % 65536 }
+  Say ((Stamp) + " >> PUSH " + $path + " -> " + $destination + " " + $bytes.Length + " bytes sum " + $sum)
+  $sp.Write("U " + $bytes.Length + " " + $sum + " " + $destination + "`n")
+  if (-not (Wait-Line '^(UOK|UERR)' 4)) { Say ((Stamp) + " PUSHFAIL no UOK"); return }
+  [void](Send-Body $bytes 0)
+}
+# Continue an interrupted push: send the rest of the body without a new header.
+function Resume-File([string]$path, [int]$offset) {
+  $bytes = [System.IO.File]::ReadAllBytes($path)
+  Say ((Stamp) + " >> RESUME " + $path + " from " + $offset + " of " + $bytes.Length)
+  [void](Send-Body $bytes $offset)
 }
 $end = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $end) {
@@ -63,9 +80,15 @@ while ((Get-Date) -lt $end) {
   if ($CmdFile -and (Test-Path $CmdFile)) {
     $cmds = Get-Content $CmdFile; Remove-Item $CmdFile
     foreach ($c in $cmds) {
-      if ($c -match '^!push\s+"([^"]+)"(?:\s+(\S+))?$') { Push-File $Matches[1] $Matches[2] }
-      elseif ($c -match '^!push\s+(\S+)(?:\s+(\S+))?$') { Push-File $Matches[1] $Matches[2] }
-      elseif ($c) { $sp.Write($c + "`n"); Write-Output ((Stamp) + " >> " + $c) }
+      $m1 = [regex]::Match($c, '^!push\s+"([^"]+)"(?:\s+(\S+))?$')
+      $m2 = [regex]::Match($c, '^!push\s+(\S+)(?:\s+(\S+))?$')
+      $m3 = [regex]::Match($c, '^!resume\s+"([^"]+)"\s+(\d+)$')
+      try {
+        if ($m1.Success) { Push-File $m1.Groups[1].Value $m1.Groups[2].Value }
+        elseif ($m3.Success) { Resume-File $m3.Groups[1].Value ([int]$m3.Groups[2].Value) }
+        elseif ($m2.Success) { Push-File $m2.Groups[1].Value $m2.Groups[2].Value }
+        elseif ($c) { $sp.Write($c + "`n"); Say ((Stamp) + " >> " + $c) }
+      } catch { Say ((Stamp) + " PUSHFAIL exception " + $_.Exception.Message) }
     }
   }
 }

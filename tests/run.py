@@ -396,6 +396,24 @@ def test_msp_variant_detects_betaflight():
 TESTS += [test_msp_variant_detects_inav_without_ping, test_msp_variant_detects_betaflight]
 
 
+def test_usb_update_times_out():
+    h = Harness({"FM": "ACRO*"})
+    h.module.init()
+    h.serial_in.append("U 1000 5\n")
+    h.module.background()
+    h.serial_in.append("x" * 128)
+    h.module.background()
+    for _ in range(6):                      # 6 s with no more data
+        h.now += 100; h.module.background()
+    out = "".join(h.serial_out)
+    assert "UERR timeout at 128" in out, out[-200:]
+    h.serial_in.append("d\n")              # commands work again afterwards
+    h.module.background()
+    assert out.count(" fm=") < "".join(h.serial_out).count(" fm=")
+
+TESTS += [test_usb_update_times_out]
+
+
 def test_device_info_detection_and_origin_filter():
     cases = [("INAV 9.1.1: JBF7", "inav"), ("Betaflight: JBF7", "bf"),
              ("BTFL", "bf"), ("ArduPlane V4.6.0", "ap"),
