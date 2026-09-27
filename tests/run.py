@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Small EdgeTX host harness for SCRIPTS/TELEMETRY/inav.lua."""
+"""Small EdgeTX host harness for SCRIPTS/TELEMETRY/fctel.lua."""
 from pathlib import Path
 import lupa.lua53 as lupa53  # EdgeTX 2.11 runs Lua 5.3.6
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "SCRIPTS" / "TELEMETRY" / "inav.lua"
+SCRIPT = ROOT / "SCRIPTS" / "TELEMETRY" / "fctel.lua"
 
 
 class Harness:
@@ -218,7 +218,7 @@ def test_edgetx_traps():
     texts = [str(d[2]) for d in h.draws if len(d) >= 3]
     assert not any("ERROR" in t for t in texts), [t for t in texts if "ERROR" in t][:3]
     assert h.test["getPage"]() != 1 or True
-    log = h.files.get("/LOGS/inav_dbg.txt", [])
+    log = h.files.get("/LOGS/fctel_dbg.txt", [])
     assert any(l.startswith("START") for l in log), log[:3]
     assert any(" fm=ANGL* " in l for l in log), log[:3]
     assert not any(l.startswith("ERR") for l in log), [l for l in log if l.startswith("ERR")]
@@ -252,8 +252,8 @@ def test_error_trap_shows_message():
     h.lua.globals().lcd.drawText = lambda *a: h.draws.append(a) if a[2] != "ACRO" else (_ for _ in ()).throw(RuntimeError("boom"))
     h.module["run"](0)
     texts = [str(d[2]) for d in h.draws if len(d) >= 3]
-    assert "INAV.LUA ERROR" in texts, texts[:5]
-    assert any(l.startswith("ERR") for l in h.files.get("/LOGS/inav_dbg.txt", []))
+    assert "FCTEL ERROR" in texts, texts[:5]
+    assert any(l.startswith("ERR") for l in h.files.get("/LOGS/fctel_dbg.txt", []))
 
 
 def test_late_sensor_discovery():
@@ -263,7 +263,7 @@ def test_late_sensor_discovery():
     for _ in range(4):
         h.now += 100
         h.module["background"]()
-    log = h.files.get("/LOGS/inav_dbg.txt", [])
+    log = h.files.get("/LOGS/fctel_dbg.txt", [])
     assert any(" fm=MANU* " in l for l in log), log[-2:]
 
 
@@ -301,7 +301,7 @@ def test_usb_update():
         h.module["background"]()
     out = "".join(h.serial_out)
     assert "UDONE" in out, out[-300:]
-    assert "".join(h.files["/SCRIPTS/TELEMETRY/inav.lua"]) == body
+    assert "".join(h.files["/SCRIPTS/TELEMETRY/fctel.lua"]) == body
 
 
 def test_usb_update_bad_sum():
@@ -312,7 +312,7 @@ def test_usb_update_bad_sum():
     h.serial_in.append("0123456789")
     h.module["background"]()
     out = "".join(h.serial_out)
-    assert "UERR sum" in out and "/SCRIPTS/TELEMETRY/inav.lua" not in h.files, out[-200:]
+    assert "UERR sum" in out and "/SCRIPTS/TELEMETRY/fctel.lua" not in h.files, out[-200:]
 
 
 
@@ -330,21 +330,21 @@ def test_mode_voice():
     played = []
     wrap = h.lua.eval('function(f) return function(...) return f(...) end end')
     h.lua.globals().playFile = wrap(lambda p: played.append(str(p)))
-    h.files["/SOUNDS/en/inav/fbwa.wav"] = ["x"]
-    h.files["/SOUNDS/en/inav/manual.wav"] = ["x"]
-    h.files["/SOUNDS/en/inav/acro.wav"] = ["x"]
+    h.files["/SOUNDS/en/fctel/fbwa.wav"] = ["x"]
+    h.files["/SOUNDS/en/fctel/manual.wav"] = ["x"]
+    h.files["/SOUNDS/en/fctel/acro.wav"] = ["x"]
     h.module["init"]()
     def tick(n=1):
         for _ in range(n):
             h.now += 10; h.module["background"]()
     tick(6)                                # settle: first mode spoken once
-    assert played == ["/SOUNDS/en/inav/acro.wav"], played
+    assert played == ["/SOUNDS/en/fctel/acro.wav"], played
     h.sensors["FM"] = "MANU*"; tick(1)     # sweep through MANUAL quickly...
     h.sensors["FM"] = "ANGL*"; tick(6)     # ...and stop on ANGLE
-    assert played[-1] == "/SOUNDS/en/inav/fbwa.wav", played
-    assert "/SOUNDS/en/inav/manual.wav" not in played, played
+    assert played[-1] == "/SOUNDS/en/fctel/fbwa.wav", played
+    assert "/SOUNDS/en/fctel/manual.wav" not in played, played
     tick(10)
-    assert played.count("/SOUNDS/en/inav/fbwa.wav") == 1, played
+    assert played.count("/SOUNDS/en/fctel/fbwa.wav") == 1, played
 
 TESTS += [test_old_fork_blocked_suffix, test_mode_voice]
 TESTS += [test_usb_console, test_usb_update, test_usb_update_bad_sum]

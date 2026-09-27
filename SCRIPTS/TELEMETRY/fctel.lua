@@ -13,7 +13,7 @@ local CFG = {
   sayModes = true,       -- speak every flight-mode change, armed or not
   angleAsFbwa = true,    -- say "F-B-W-A" for ANGLE (ArduPilot name); false says "angle"
   modeSettle = 40,       -- 10 ms ticks a mode must hold before it is spoken (skips switch sweeps)
-  debugLog = true,       -- write /LOGS/inav_dbg.txt once a second (for bench debugging)
+  debugLog = true,       -- write /LOGS/fctel_dbg.txt once a second (for bench debugging)
   usbConsole = true,     -- stream the same lines over USB when the VCP port is set to LUA
   mspTimeout = 300,      -- 10 ms ticks to wait for an MSP reply (replies share the telemetry downlink)
   mspGap = 100,          -- 10 ms ticks between MSP requests; backs off to 5 s after 6 misses in a row
@@ -241,8 +241,8 @@ local function sayMode(m, urgent)
   if ev then ev("SAY " .. tostring(f or m)) end
   local played = false
   if CFG.useWav and f and io and io.open then
-    local h = io.open("/SOUNDS/en/inav/" .. f .. ".wav", "r")
-    if h then io.close(h); playFile("/SOUNDS/en/inav/" .. f .. ".wav"); played = true end
+    local h = io.open("/SOUNDS/en/fctel/" .. f .. ".wav", "r")
+    if h then io.close(h); playFile("/SOUNDS/en/fctel/" .. f .. ".wav"); played = true end
   end
   if not played then tone(urgent and "urgent" or "mode")
   elseif urgent then playHaptic(180,60) end
@@ -348,7 +348,7 @@ local function ulog(line) if usb then pcall(serialWrite, line .. "\r\n") end end
 local function dlog(line)
   ulog(line)
   if not CFG.debugLog or not io then return end
-  local f = io.open("/LOGS/inav_dbg.txt", dumpLines > 900 and "w" or "a")
+  local f = io.open("/LOGS/fctel_dbg.txt", dumpLines > 900 and "w" or "a")
   if dumpLines > 900 then dumpLines = 0 end
   if f then io.write(f, line, "\n"); io.close(f); dumpLines = dumpLines + 1 end
 end
@@ -371,8 +371,8 @@ local function sensorList()
 end
 -- Over-USB update. Host sends "U <size> <sum>\n", then raw bytes in chunks of at most
 -- 128 (the Lua serial FIFO is 256). Each read is acked with "UACK <bytes so far>".
--- The file lands in inav.tmp, is checked, then copied over inav.lua a block at a time.
-local UPTMP, UPDST = "/SCRIPTS/TELEMETRY/inav.tmp", "/SCRIPTS/TELEMETRY/inav.lua"
+-- The file lands in fctel.tmp, is checked, then copied over fctel.lua a block at a time.
+local UPTMP, UPDST = "/SCRIPTS/TELEMETRY/fctel.tmp", "/SCRIPTS/TELEMETRY/fctel.lua"
 local up = nil
 local function upStart(size, sum)
   local fh = io.open(UPTMP, "w")
@@ -525,7 +525,7 @@ local function trap(fn, arg)
 end
 local function safeRun(event)
   if not trap(run, event) then
-    lcd.clear(); lcd.drawText(0, 0, "INAV.LUA ERROR", INVERS or 0)
+    lcd.clear(); lcd.drawText(0, 0, "FCTEL ERROR", INVERS or 0)
     local m = tostring(lastErr or "?")
     for i = 0, 5 do lcd.drawText(0, 9 + i * 9, ssub(m, i * 21 + 1, i * 21 + 21), 0) end
   end

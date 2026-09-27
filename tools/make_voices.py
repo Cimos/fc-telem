@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate the flight-mode voice clips for inav.lua.
+"""Generate the flight-mode voice clips for fctel.lua.
 
 Microsoft neural TTS (edge-tts) -> MP3 -> 32 kHz 16-bit mono PCM WAV, the format
 EdgeTX voice packs use. Silence is trimmed and each clip is normalised to the same
 peak, so they all sound alike on the radio.
 
 Usage: .venv/bin/python tools/make_voices.py [--voice en-AU-NatashaNeural]
-Writes SOUNDS/en/inav/<name>.wav; copy that folder to the radio's SD card.
+Writes SOUNDS/en/fctel/<name>.wav; copy that folder to the radio's SD card.
 """
 import argparse, array, asyncio, io, wave
 from pathlib import Path
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "SOUNDS" / "en" / "inav"
 RATE = 32000
 
-# file name (matches wavName in inav.lua) -> spoken phrase
+# file name (matches wavName in fctel.lua) -> spoken phrase
 CLIPS = {
     "fbwa": "F-B-W-A",
     "angle": "Angle",

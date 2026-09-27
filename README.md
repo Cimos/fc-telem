@@ -1,12 +1,12 @@
 # MAD_CAPPY INAV telemetry
 
-`inav.lua` is a three-page EdgeTX telemetry screen for a RadioMaster Boxer with a 128x64 display. It combines normal CRSF sensors with non-blocking MSP-over-CRSF requests to INAV.
+`fctel.lua` is a three-page EdgeTX telemetry screen for a RadioMaster Boxer with a 128x64 display. It combines normal CRSF sensors with non-blocking MSP-over-CRSF requests to INAV.
 
 The main page shows flight mode, arm state or refusal reason, GPS and link state, altitude, speed, home distance and direction, battery use, remaining capacity, and an armed-only flight timer. The second page concentrates on link and battery data, including estimated range. The third page is a pre-flight checklist. Alerts continue in `background()` while another radio screen is open.
 
 ## Install
 
-1. Copy `SCRIPTS/TELEMETRY/inav.lua` to the same path on the radio SD card.
+1. Copy `SCRIPTS/TELEMETRY/fctel.lua` to the same path on the radio SD card.
 2. In the model setup, discover the CRSF telemetry sensors. Keep their standard names (`FM`, `RxBt`, `Curr`, `Capa`, `Bat%`, `GPS`, `GSpd`, `Hdg`, `Alt`, `Sats`, `RQly`, `1RSS`, `RSNR`, `TPWR`, and `VSpd`). Missing sensors are allowed.
 3. Open the model's **Telemetry screens** page, add a **Script** screen, and select `inav`.
 4. Set the ExpressLRS telemetry ratio to 1:2 or 1:4. A slower ratio makes MSP updates less responsive.
@@ -16,7 +16,7 @@ The custom fork firmware is required for the compact arming-reason values carrie
 
 ## Configuration
 
-Edit the `CFG` table at the top of `inav.lua` before copying it to the SD card:
+Edit the `CFG` table at the top of `fctel.lua` before copying it to the SD card:
 
 - `capacity`: usable battery capacity in mAh.
 - `lqWarn`: low link-quality threshold.
@@ -30,7 +30,7 @@ Cell count is detected once from the first valid `RxBt` value. Range is an estim
 
 ## Optional sounds
 
-Put these files in `/SOUNDS/en/inav/`:
+Put these files in `/SOUNDS/en/fctel/`:
 
 `acro.wav`, `angle.wav`, `horizon.wav`, `anglehold.wav`, `manual.wav`, `althold.wav`, `cruise.wav`, `coursehold.wav`, `loiter.wav`, `poshold.wav`, `waypoint.wav`, `rth.wav`, `wprth.wav`, `landing.wav`, `failsafe.wav`, and `homereset.wav`.
 
@@ -43,7 +43,7 @@ The script keeps one sensor table, one small MSP receive buffer, and fixed looku
 ## Bench debugging
 
 `CFG.debugLog = true` makes the script append one status line per second to
-`/LOGS/inav_dbg.txt` on the radio's SD card: raw FM string, decoded mode and arming
+`/LOGS/fctel_dbg.txt` on the radio's SD card: raw FM string, decoded mode and arming
 reason, sats, LQ, RxBt, capacity, GPS, home, MSP requests/replies/timeouts, arming
 flags, nav state, page and Lua memory. Any Lua error is caught, shown on screen with
 its message, and written to the log as an `ERR` line instead of killing the script.
@@ -82,9 +82,9 @@ console picks the port that is sending script lines.
 
 ### Updating the script over the same cable
 
-With the console running, `tools/push.sh` sends the current `inav.lua` to the radio
+With the console running, `tools/push.sh` sends the current `fctel.lua` to the radio
 through the script's own updater: 128-byte chunks, each acknowledged, a checksum at
-the end, then a copy over `SCRIPTS/TELEMETRY/inav.lua`. The console prints `PUSHOK`
+the end, then a copy over `SCRIPTS/TELEMETRY/fctel.lua`. The console prints `PUSHOK`
 or `PUSHFAIL`. A bad checksum leaves the old file in place. Select the model again
 on the radio (or power-cycle) to run the new version. The updater only exists from
 this version on, so the first install still goes over USB Storage.
@@ -95,7 +95,7 @@ Every flight-mode change is spoken once the switch has settled for 0.4 s, armed 
 not (`CFG.sayModes`). ANGLE is announced as "F-B-W-A", the ArduPilot name, unless
 `CFG.angleAsFbwa` is false. RTH and failsafe also buzz while armed.
 
-The clips live in `SOUNDS/en/inav/` (17 files, Australian English neural voice,
+The clips live in `SOUNDS/en/fctel/` (17 files, Australian English neural voice,
 32 kHz 16-bit mono like the EdgeTX packs) and are copied to the card by
 `tools/sync.sh`. To change a phrase or the voice, edit `CLIPS` in
 `tools/make_voices.py` and run it (`--voice en-GB-SoniaNeural` etc.). A missing clip
