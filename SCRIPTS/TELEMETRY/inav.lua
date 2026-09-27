@@ -10,6 +10,9 @@ local CFG = {
   reservePercent = 20,   -- capacity warning threshold
   reserveRepeat = 2000,  -- 20 seconds
   useWav = true,         -- false uses tones; missing WAVs also use tones
+  sayModes = true,       -- speak every flight-mode change, armed or not
+  angleAsFbwa = true,    -- say "F-B-W-A" for ANGLE (ArduPilot name); false says "angle"
+  modeSettle = 40,       -- 10 ms ticks a mode must hold before it is spoken (skips switch sweeps)
   debugLog = true,       -- write /LOGS/inav_dbg.txt once a second (for bench debugging)
   usbConsole = true,     -- stream the same lines over USB when the VCP port is set to LUA
   mspTimeout = 300,      -- 10 ms ticks to wait for an MSP reply (replies share the telemetry downlink)
@@ -222,6 +225,7 @@ local mode, reason, blocked = "UNKNOWN", "", false
 local homeLat, homeLon, homeSet, distance, bearing = nil, nil, false, nil, nil
 local armedTicks, armTick, lastBg = 0, 0, 0
 local lastMode, lastReason = "", ""
+local pendingMode, pendingAt, spokenMode = nil, 0, nil
 local lastLq, lastBat, lastReserve, lastRefused = -100000, -100000, -100000, -100000
 local startCapa, efficiency, flownKm = nil, nil, 0
 local lastLat, lastLon
@@ -233,6 +237,8 @@ local function tone(kind)
 end
 local function sayMode(m, urgent)
   local f = wavName[m]
+  if m == "ANGLE" and CFG.angleAsFbwa then f = "fbwa" end
+  if ev then ev("SAY " .. tostring(f or m)) end
   local played = false
   if CFG.useWav and f and io and io.open then
     local h = io.open("/SOUNDS/en/inav/" .. f .. ".wav", "r")
@@ -298,8 +304,15 @@ local function updateState(now)
 end
 
 local function doAlerts(now)
-  if armed and mode ~= lastMode and lastMode ~= "" then
-    sayMode(mode, mode == "RTH" or mode == "FAILSAFE")
+  -- Speak a mode once it has held for CFG.modeSettle, so a quick sweep across the
+  -- switch only announces where it stops. Armed or disarmed, when CFG.sayModes is on;
+  -- otherwise only while armed (the old behaviour).
+  if mode ~= lastMode then pendingMode, pendingAt = mode, now end
+  if pendingMode and now - pendingAt >= CFG.modeSettle then
+    local m = pendingMode; pendingMode = nil
+    if m ~= spokenMode and m ~= "UNKNOWN" and m ~= "BLOCKED" and (CFG.sayModes or armed) then
+      sayMode(m, armed and (m == "RTH" or m == "FAILSAFE")); spokenMode = m
+    end
   end
   if not armed and blocked and reason ~= lastReason and now-lastRefused >= 500 then
     tone("urgent"); lastRefused = now

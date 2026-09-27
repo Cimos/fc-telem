@@ -323,7 +323,30 @@ def test_old_fork_blocked_suffix():
     mode, reason, armed, blocked = h.test.decodeFM("!GPS")
     assert blocked and reason == "NO GPS FIX"
 
-TESTS += [test_old_fork_blocked_suffix]
+
+
+def test_mode_voice():
+    h = Harness({"FM": "ACRO*"})
+    played = []
+    wrap = h.lua.eval('function(f) return function(...) return f(...) end end')
+    h.lua.globals().playFile = wrap(lambda p: played.append(str(p)))
+    h.files["/SOUNDS/en/inav/fbwa.wav"] = ["x"]
+    h.files["/SOUNDS/en/inav/manual.wav"] = ["x"]
+    h.files["/SOUNDS/en/inav/acro.wav"] = ["x"]
+    h.module["init"]()
+    def tick(n=1):
+        for _ in range(n):
+            h.now += 10; h.module["background"]()
+    tick(6)                                # settle: first mode spoken once
+    assert played == ["/SOUNDS/en/inav/acro.wav"], played
+    h.sensors["FM"] = "MANU*"; tick(1)     # sweep through MANUAL quickly...
+    h.sensors["FM"] = "ANGL*"; tick(6)     # ...and stop on ANGLE
+    assert played[-1] == "/SOUNDS/en/inav/fbwa.wav", played
+    assert "/SOUNDS/en/inav/manual.wav" not in played, played
+    tick(10)
+    assert played.count("/SOUNDS/en/inav/fbwa.wav") == 1, played
+
+TESTS += [test_old_fork_blocked_suffix, test_mode_voice]
 TESTS += [test_usb_console, test_usb_update, test_usb_update_bad_sum]
 TESTS += [test_edgetx_traps, test_page_keys_via_metatable_globals,
           test_error_trap_shows_message, test_late_sensor_discovery]

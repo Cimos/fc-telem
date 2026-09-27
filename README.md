@@ -88,3 +88,15 @@ the end, then a copy over `SCRIPTS/TELEMETRY/inav.lua`. The console prints `PUSH
 or `PUSHFAIL`. A bad checksum leaves the old file in place. Select the model again
 on the radio (or power-cycle) to run the new version. The updater only exists from
 this version on, so the first install still goes over USB Storage.
+
+## Voice
+
+Every flight-mode change is spoken once the switch has settled for 0.4 s, armed or
+not (`CFG.sayModes`). ANGLE is announced as "F-B-W-A", the ArduPilot name, unless
+`CFG.angleAsFbwa` is false. RTH and failsafe also buzz while armed.
+
+The clips live in `SOUNDS/en/inav/` (17 files, Australian English neural voice,
+32 kHz 16-bit mono like the EdgeTX packs) and are copied to the card by
+`tools/sync.sh`. To change a phrase or the voice, edit `CLIPS` in
+`tools/make_voices.py` and run it (`--voice en-GB-SoniaNeural` etc.). A missing clip
+falls back to a tone.
