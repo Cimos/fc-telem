@@ -318,6 +318,8 @@ def test_usb_update():
     out = "".join(h.serial_out)
     assert "UDONE" in out, out[-300:]
     assert "".join(h.files["/SCRIPTS/TELEMETRY/fctel.lua"]) == body
+    # Same text written over the compiled copy, so a stale .luac can't win.
+    assert "".join(h.files["/SCRIPTS/TELEMETRY/fctel.luac"]) == body
 
 
 def test_usb_update_bad_sum():

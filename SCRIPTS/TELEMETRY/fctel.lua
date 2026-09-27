@@ -409,10 +409,21 @@ local function upStep()
       if not up.src or not up.dst then ulog("UERR copy"); up = nil end
     end
   else
+    -- Phase 2 copies tmp -> target. For a .lua target, phase 3 copies the same
+    -- text over the matching .luac: EdgeTX loads a .luac whenever its file date
+    -- is not older than the .lua, and with an unset radio clock the old compiled
+    -- copy would keep winning. Its loader accepts plain Lua text in a .luac.
     local d = io.read(up.src, 512)
     if d and #d > 0 then io.write(up.dst, d); up.copied = up.copied + #d end
     if not d or #d < 512 then
       io.close(up.src); io.close(up.dst)
+      local luac = (up.phase == 2 and ssub(up.dstPath, -4) == ".lua") and (up.dstPath .. "c") or nil
+      if luac then
+        up.src, up.dst, up.phase = io.open(up.tmp, "r"), io.open(luac, "w"), 3
+        if up.src and up.dst then return end
+        if up.src then io.close(up.src) end
+        if up.dst then io.close(up.dst) end
+      end
       ulog("UDONE " .. up.copied .. " (power-cycle the radio to run it)"); up = nil
     end
   end
