@@ -51,6 +51,11 @@ class Harness:
         io.close = lambda fh: True
         g.io = io
         g.collectgarbage = self.lua.eval('collectgarbage')
+        self.serial_out, self.serial_in = [], []
+        # Real Lua functions, as on the radio (type() must say "function").
+        wrap = self.lua.eval('function(f) return function(...) return f(...) end end')
+        g.serialWrite = wrap(lambda txt: self.serial_out.append(str(txt)))
+        g.serialRead = wrap(lambda *a: self.serial_in.pop(0) if self.serial_in else "")
         lcd = self.lua.table()
         lcd.clear = lambda *args: None
         lcd.drawText = lambda *args: self.draws.append(args)
@@ -233,6 +238,25 @@ def test_late_sensor_discovery():
     log = h.files.get("/LOGS/inav_dbg.txt", [])
     assert any(" fm=MANU* " in l for l in log), log[-2:]
 
+
+def test_usb_console():
+    h = Harness({"FM": "!GPS", "Sats": 3})
+    h.module["init"]()
+    h.now += 100
+    h.module["background"]()
+    out = "".join(h.serial_out)
+    assert "START" in out and " fm=!GPS " in out and "REASON 'NO GPS FIX'" in out, out[:300]
+    h.serial_in.append("s\n")
+    h.module["background"]()
+    assert "SENSOR FM" in "".join(h.serial_out)
+    h.serial_in.append("p3\n")
+    h.module["background"]()
+    assert h.test["getPage"]() == 3
+    h.serial_in.append("v\n")
+    h.module["background"]()
+    assert "OK verbose=true" in "".join(h.serial_out)
+
+TESTS += [test_usb_console]
 TESTS += [test_edgetx_traps, test_page_keys_via_metatable_globals,
           test_error_trap_shows_message, test_late_sensor_discovery]
 

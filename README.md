@@ -56,3 +56,26 @@ current script, clears the log, and prints any errors plus the last lines.
 The host tests run under Lua 5.3 like EdgeTX 2.11 and mimic its quirks on 128x64
 radios: no string methods (`s:sub()` fails), constants only reachable as plain
 globals, and file handles without methods.
+
+## Live USB console (bench testing)
+
+The script can stream its status over the radio's USB port while you test, with the
+radio running normally.
+
+One-time radio setup (EdgeTX 2.11): **SYS > Hardware > Serial ports > USB-VCP = LUA**.
+
+Each session: plug the radio into the PC and choose **USB Serial (VCP)** on the
+popup, then on the PC run `tools/console.sh`. It finds the radio's COM port, prints
+every line with a timestamp and saves it to `debug/console-<time>.log`
+(`debug/console-latest.log` points at the newest).
+
+Lines: `START`, a status line once a second (same fields as the SD log), `EV` events
+(mode change, arming reason change, MSP timeouts, and with verbose on every MSP
+request and reply), `ERR` Lua errors.
+
+Commands (write one per line to `debug/cmd.txt` while the console runs):
+`d` dump now, `v` toggle verbose MSP events, `s` list sensors with their ids and
+values, `p1`/`p2`/`p3` jump to a page, `e` show the last Lua error.
+
+INAV flight controllers use the same USB id (0483:5740). With both plugged in, the
+console picks the port that is sending script lines.

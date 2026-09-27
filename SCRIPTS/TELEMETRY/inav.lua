@@ -11,6 +11,7 @@ local CFG = {
   reserveRepeat = 2000,  -- 20 seconds
   useWav = true,         -- false uses tones; missing WAVs also use tones
   debugLog = true,       -- write /LOGS/inav_dbg.txt once a second (for bench debugging)
+  usbConsole = true,     -- stream the same lines over USB when the VCP port is set to LUA
 }
 
 local floor, ceil, abs, sqrt = math.floor, math.ceil, math.abs, math.sqrt
@@ -127,6 +128,7 @@ local rx, rxSize, rxCmd, rxSeq, rxStarted = {}, 0, 0, 0, false
 local statusFlags, statusSeen, mspArmed, navMode, navState = 0, false, false, 0, 0
 local mspDistance, mspBearing
 local mspTx, mspRx, mspTimeouts = 0, 0, 0
+local verbose, ev = false, nil  -- ev(line) set below
 
 local function encodeRequest(cmd, seq)
   local p = {FC, RADIO}
@@ -144,6 +146,7 @@ local function sendRequest(cmd)
   local p = encodeRequest(cmd, txSeq)
   if crossfireTelemetryPush(MSP_REQ, p) then
     txSeq = (txSeq + 1) % 16; waiting = cmd; reqAt = getTime(); mspTx = mspTx + 1
+    if verbose and ev then ev("MSP TX " .. cmd .. " seq " .. txSeq) end
     rxStarted = false
   end
 end
@@ -179,6 +182,7 @@ local function receiveChunk(p, now)
   while i <= #p and #rx < rxSize do rx[#rx+1] = p[i]; i = i + 1 end
   if #rx >= rxSize then
     rxStarted = false; lastReply = now or getTime(); waiting = nil; mspRx = mspRx + 1
+    if verbose and ev then ev("MSP RX " .. rxCmd .. " len " .. #rx) end
     parseReply(rxCmd, rx); return true
   end
   return false
@@ -190,7 +194,10 @@ local function pollMSP(now)
     if not typ then break end
     if typ == MSP_RESP then receiveChunk(p, now) end
   end
-  if waiting and now - reqAt > 100 then waiting = nil; rxStarted = false; mspTimeouts = mspTimeouts + 1 end
+  if waiting and now - reqAt > 100 then
+    if ev then ev("MSP TIMEOUT " .. waiting) end
+    waiting = nil; rxStarted = false; mspTimeouts = mspTimeouts + 1
+  end
   if not waiting and now - reqAt >= 50 then
     reqIndex = reqIndex % #commands + 1; sendRequest(commands[reqIndex])
   end
@@ -310,7 +317,10 @@ local function resolveSensors()
     end
   end
 end
+local usb = CFG.usbConsole and type(serialWrite) == "function"
+local function ulog(line) if usb then pcall(serialWrite, line .. "\r\n") end end
 local function dlog(line)
+  ulog(line)
   if not CFG.debugLog or not io then return end
   local f = io.open("/LOGS/inav_dbg.txt", dumpLines > 900 and "w" or "a")
   if dumpLines > 900 then dumpLines = 0 end
@@ -328,11 +338,32 @@ local function dump(now)
     " flags=" .. S(statusFlags) .. " nav=" .. S(navMode) .. "/" .. S(navState) ..
     " page=" .. S(page) .. " mem=" .. S(math.floor(collectgarbage("count"))))
 end
+ev = function(line) dlog("EV " .. S(getTime()) .. " " .. line) end
+local prevMode, prevReason = nil, nil
+local function sensorList()
+  for i=1,#sensorNames do ulog("SENSOR " .. sensorNames[i] .. " id=" .. S(sid[i]) .. " val=" .. S(val[i])) end
+end
+local function command(c)
+  c = string.gsub(c, "[%s]+", "")
+  if c == "" then return end
+  if c == "d" then dump(getTime())
+  elseif c == "v" then verbose = not verbose; ulog("OK verbose=" .. S(verbose))
+  elseif c == "s" then sensorList()
+  elseif c == "p1" or c == "p2" or c == "p3" then page = tonumber(ssub(c, 2)); ulog("OK page=" .. S(page))
+  elseif c == "e" then ulog("LASTERR " .. S(lastErr))
+  else ulog("CMDS d=dump v=verbose s=sensors p1..p3=page e=last error") end
+end
 local function background()
   local now = getTime()
   if now - lastResolve >= 200 then resolveSensors(); lastResolve = now end
   readSensors(); pollMSP(now); updateState(now); doAlerts(now); lastBg = now
-  if CFG.debugLog and now - lastDump >= 100 then dump(now); lastDump = now end
+  if mode ~= prevMode then ev("MODE " .. S(prevMode) .. " -> " .. S(mode)); prevMode = mode end
+  if reason ~= prevReason then ev("REASON '" .. S(reason) .. "'"); prevReason = reason end
+  if usb and type(serialRead) == "function" then
+    local ok, c = pcall(serialRead)
+    if ok and type(c) == "string" and #c > 0 then command(c) end
+  end
+  if (CFG.debugLog or usb) and now - lastDump >= 100 then dump(now); lastDump = now end
 end
 
 -- Display -------------------------------------------------------------------
