@@ -494,11 +494,12 @@ end
 
 local function run(event)
   background()
-  local nextPage = EVT_VIRTUAL_NEXT_PAGE
-  local prevPage = EVT_VIRTUAL_PREV_PAGE
-  local enter = EVT_VIRTUAL_ENTER or EVT_ENTER_BREAK
-  if event and (event==nextPage or event==enter) then page=page%3+1
-  elseif event and event==prevPage then page=(page+1)%3+1 end
+  -- Scroll wheel changes the script's page. PAGE buttons are left to EdgeTX so they
+  -- move between telemetry screens; the page number is kept, so coming back to this
+  -- screen shows the page you left. The script always starts on the main page.
+  local nxt, prv = EVT_VIRTUAL_NEXT, EVT_VIRTUAL_PREV
+  if event and nxt and event == nxt then page = page % 3 + 1
+  elseif event and prv and event == prv then page = (page + 1) % 3 + 1 end
   lcd.clear()
   if page==1 then drawMain(getTime()) elseif page==2 then drawLink() else drawChecklist() end
   return 0

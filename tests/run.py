@@ -32,7 +32,8 @@ class Harness:
         # Like EdgeTX: constants live in a read-only table behind _G's metatable,
         # so rawget(_G, "EVT_...") returns nil but a plain global read works.
         consts = self.lua.table(EVT_VIRTUAL_NEXT_PAGE=101, EVT_VIRTUAL_PREV_PAGE=102,
-                                EVT_VIRTUAL_ENTER=103, DBLSIZE=1, MIDSIZE=2, INVERS=4,
+                                EVT_VIRTUAL_ENTER=103, EVT_VIRTUAL_NEXT=201,
+                                EVT_VIRTUAL_PREV=202, DBLSIZE=1, MIDSIZE=2, INVERS=4,
                                 BLINK=8, SOLID=0)
         self.lua.eval('function(c) setmetatable(_G, {__index = c}) end')(consts)
         # Like EdgeTX io: io.open/io.write/io.read/io.close, handles have no methods.
@@ -186,9 +187,9 @@ def test_pages_and_empty_background():
     h.module.init()
     h.module.background()                 # no discovered sensors
     assert h.test.getPage() == 1
-    h.module.run(101); assert h.test.getPage() == 2
-    h.module.run(103); assert h.test.getPage() == 3
-    h.module.run(102); assert h.test.getPage() == 2
+    h.module.run(201); assert h.test.getPage() == 2   # wheel right
+    h.module.run(201); assert h.test.getPage() == 3
+    h.module.run(202); assert h.test.getPage() == 2   # wheel left
     assert h.draws
 
 
@@ -224,12 +225,25 @@ def test_edgetx_traps():
 
 
 def test_page_keys_via_metatable_globals():
+    """Wheel pages the script; PAGE buttons and ENTER do not (EdgeTX uses them)."""
     h = Harness({"FM": "ACRO*"})
     h.module["init"]()
-    h.module["run"](101)
-    assert h.test["getPage"]() == 2, h.test["getPage"]()
-    h.module["run"](102)
-    assert h.test["getPage"]() == 1, h.test["getPage"]()
+    assert h.test["getPage"]() == 1
+    for ev in (101, 102, 103):          # NEXT_PAGE, PREV_PAGE, ENTER
+        h.module["run"](ev)
+        assert h.test["getPage"]() == 1, (ev, h.test["getPage"]())
+    h.module["run"](201)                # wheel right
+    assert h.test["getPage"]() == 2
+    h.module["run"](201)
+    assert h.test["getPage"]() == 3
+    h.module["run"](201)
+    assert h.test["getPage"]() == 1
+    h.module["run"](202)                # wheel left
+    assert h.test["getPage"]() == 3
+    h.module["run"](101)                # page away and back: stays on page 3
+    h.module["background"]()
+    h.module["run"](0)
+    assert h.test["getPage"]() == 3
 
 
 def test_error_trap_shows_message():
