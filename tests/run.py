@@ -12,6 +12,8 @@ class Harness:
         self.lua = lupa53.LuaRuntime(unpack_returned_tuples=True)
         # Like EdgeTX on 128x64 radios: strings have no methods (s:sub fails).
         self.lua.execute('getmetatable("").__index = nil')
+        # Like EdgeTX 2.11 on 128x64 radios: only base, io, string, math, bit32 exist.
+        self.lua.execute('table, os, coroutine, utf8, package, debug = nil, nil, nil, nil, nil, nil')
         self.logs = []
         self.now = 1000
         self.sensors = sensors or {}
@@ -33,21 +35,33 @@ class Harness:
                                 EVT_VIRTUAL_ENTER=103, DBLSIZE=1, MIDSIZE=2, INVERS=4,
                                 BLINK=8, SOLID=0)
         self.lua.eval('function(c) setmetatable(_G, {__index = c}) end')(consts)
-        # Like EdgeTX io: io.open/io.write/io.close, handles have no methods.
+        # Like EdgeTX io: io.open/io.write/io.read/io.close, handles have no methods.
         files = self.files = {}
+        handles = {}
+        mk = self.lua.eval('function(n) return setmetatable({}, {__name = n}) end')
+        key = self.lua.eval('function(h) return getmetatable(h).__name end')
         io = self.lua.table()
         def io_open(name, mode="r"):
             if mode == "r" and name not in files:
                 return None
             if mode == "w" or name not in files:
                 files[name] = []
-            return self.lua.eval('function(n) return setmetatable({}, {__name = n}) end')(name)
+            hid = f"h{len(handles)}"
+            handles[hid] = [name, 0]
+            return mk(hid)
         def io_write(fh, *parts):
-            name = self.lua.eval('function(h) return getmetatable(h).__name end')(fh)
+            name = handles[key(fh)][0]
             files[name].append("".join(str(x) for x in parts))
             return fh
+        def io_read(fh, n):
+            hd = handles[key(fh)]
+            data = "".join(files[hd[0]])
+            chunk = data[hd[1]:hd[1] + int(n)]
+            hd[1] += len(chunk)
+            return chunk
         io.open = io_open
         io.write = io_write
+        io.read = io_read
         io.close = lambda fh: True
         g.io = io
         g.collectgarbage = self.lua.eval('collectgarbage')
@@ -256,7 +270,37 @@ def test_usb_console():
     h.module["background"]()
     assert "OK verbose=true" in "".join(h.serial_out)
 
-TESTS += [test_usb_console]
+
+
+def test_usb_update():
+    h = Harness({"FM": "ACRO*"})
+    h.module["init"]()
+    body = "-- new script\n" + "x" * 700 + "\nreturn {}\n"
+    total = sum(body.encode()) % 65536
+    h.serial_in.append(f"U {len(body)} {total}\n")
+    h.module["background"]()
+    assert "UOK" in "".join(h.serial_out)
+    for i in range(0, len(body), 128):
+        h.serial_in.append(body[i:i + 128])
+        h.module["background"]()
+    for _ in range(5):
+        h.module["background"]()
+    out = "".join(h.serial_out)
+    assert "UDONE" in out, out[-300:]
+    assert "".join(h.files["/SCRIPTS/TELEMETRY/inav.lua"]) == body
+
+
+def test_usb_update_bad_sum():
+    h = Harness({"FM": "ACRO*"})
+    h.module["init"]()
+    h.serial_in.append("U 10 1\n")
+    h.module["background"]()
+    h.serial_in.append("0123456789")
+    h.module["background"]()
+    out = "".join(h.serial_out)
+    assert "UERR sum" in out and "/SCRIPTS/TELEMETRY/inav.lua" not in h.files, out[-200:]
+
+TESTS += [test_usb_console, test_usb_update, test_usb_update_bad_sum]
 TESTS += [test_edgetx_traps, test_page_keys_via_metatable_globals,
           test_error_trap_shows_message, test_late_sensor_discovery]
 

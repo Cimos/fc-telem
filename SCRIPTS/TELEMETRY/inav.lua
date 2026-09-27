@@ -88,16 +88,20 @@ local function decodeFM(s)
   return known or key, "", not ready and (known ~= nil or ssub(key,1,1) ~= "!"), false
 end
 
+-- No table library on 128x64 EdgeTX (colour radios only): build the string by hand.
 local function decodeFlags(flags)
-  local out, n = {}, 0
+  local out, n, last = "", 0, nil
   for i=1,#flagReasons do
     if has(flags, flagReasons[i][1]) then
       local text = flagReasons[i][2]
-      if n == 0 or out[n] ~= text then n = n + 1; out[n] = text end
+      if text ~= last then
+        out = (n == 0) and text or (out .. ", " .. text)
+        n = n + 1; last = text
+      end
       if n == 3 then break end
     end
   end
-  return table.concat(out, ", ")
+  return out
 end
 
 local function homeMath(lat1, lon1, lat2, lon2)
@@ -343,7 +347,46 @@ local prevMode, prevReason = nil, nil
 local function sensorList()
   for i=1,#sensorNames do ulog("SENSOR " .. sensorNames[i] .. " id=" .. S(sid[i]) .. " val=" .. S(val[i])) end
 end
+-- Over-USB update. Host sends "U <size> <sum>\n", then raw bytes in chunks of at most
+-- 128 (the Lua serial FIFO is 256). Each read is acked with "UACK <bytes so far>".
+-- The file lands in inav.tmp, is checked, then copied over inav.lua a block at a time.
+local UPTMP, UPDST = "/SCRIPTS/TELEMETRY/inav.tmp", "/SCRIPTS/TELEMETRY/inav.lua"
+local up = nil
+local function upStart(size, sum)
+  local fh = io.open(UPTMP, "w")
+  if not fh then ulog("UERR open"); return end
+  up = {size = size, sum = sum, got = 0, acc = 0, fh = fh, phase = 1}
+  ulog("UOK " .. size)
+end
+local function upStep()
+  if up.phase == 1 then
+    local ok, c = pcall(serialRead, 128)
+    if not ok or type(c) ~= "string" or #c == 0 then return end
+    local need = up.size - up.got
+    if #c > need then c = ssub(c, 1, need) end
+    io.write(up.fh, c)
+    local acc, byte = up.acc, string.byte
+    for i = 1, #c do acc = (acc + byte(c, i)) % 65536 end
+    up.acc, up.got = acc, up.got + #c
+    ulog("UACK " .. up.got)
+    if up.got >= up.size then
+      io.close(up.fh)
+      if up.acc ~= up.sum then ulog("UERR sum " .. up.acc .. " want " .. up.sum); up = nil; return end
+      up.src, up.dst, up.copied, up.phase = io.open(UPTMP, "r"), io.open(UPDST, "w"), 0, 2
+      if not up.src or not up.dst then ulog("UERR copy"); up = nil end
+    end
+  else
+    local d = io.read(up.src, 512)
+    if d and #d > 0 then io.write(up.dst, d); up.copied = up.copied + #d end
+    if not d or #d < 512 then
+      io.close(up.src); io.close(up.dst)
+      ulog("UDONE " .. up.copied .. " (select the model again to run it)"); up = nil
+    end
+  end
+end
 local function command(c)
+  local size, sum = string.match(c, "^U (%d+) (%d+)")
+  if size then upStart(tonumber(size), tonumber(sum)); return end
   c = string.gsub(c, "[%s]+", "")
   if c == "" then return end
   if c == "d" then dump(getTime())
@@ -359,7 +402,8 @@ local function background()
   readSensors(); pollMSP(now); updateState(now); doAlerts(now); lastBg = now
   if mode ~= prevMode then ev("MODE " .. S(prevMode) .. " -> " .. S(mode)); prevMode = mode end
   if reason ~= prevReason then ev("REASON '" .. S(reason) .. "'"); prevReason = reason end
-  if usb and type(serialRead) == "function" then
+  if up then upStep()
+  elseif usb and type(serialRead) == "function" then
     local ok, c = pcall(serialRead)
     if ok and type(c) == "string" and #c > 0 then command(c) end
   end

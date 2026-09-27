@@ -27,12 +27,45 @@ if (-not $Port) {
 Write-Output "PORT $Port"
 $sp = New-Object System.IO.Ports.SerialPort $Port, 115200
 $sp.DtrEnable = $true; $sp.ReadTimeout = 200; $sp.NewLine = "`n"; $sp.Open()
+function Stamp { (Get-Date).ToString("HH:mm:ss.fff") }
+# Read lines until one matches $pattern or $secs pass. Prints everything it reads.
+function Wait-Line([string]$pattern, [double]$secs) {
+  $until = (Get-Date).AddSeconds($secs)
+  while ((Get-Date) -lt $until) {
+    try { $l = $sp.ReadLine().TrimEnd("`r") } catch [System.TimeoutException] { continue }
+    if ($l) { Write-Output ((Stamp) + " " + $l); if ($l -match $pattern) { return $l } }
+  }
+  return $null
+}
+# Send a file to the script's updater: "U size sum", then 128-byte chunks, each acked.
+function Push-File([string]$path) {
+  $bytes = [System.IO.File]::ReadAllBytes($path); $sum = 0
+  foreach ($b in $bytes) { $sum = ($sum + $b) % 65536 }
+  Write-Output ((Stamp) + " >> PUSH $path $($bytes.Length) bytes sum $sum")
+  $sp.Write("U $($bytes.Length) $sum`n")
+  if (-not (Wait-Line '^UOK' 4)) { Write-Output ((Stamp) + " PUSHFAIL no UOK"); return }
+  for ($off = 0; $off -lt $bytes.Length; $off += 128) {
+    $n = [Math]::Min(128, $bytes.Length - $off); $sp.Write($bytes, $off, $n); $want = $off + $n
+    $ok = $false; $until = (Get-Date).AddSeconds(4)
+    while (-not $ok -and (Get-Date) -lt $until) {
+      $l = Wait-Line '^(UACK|UERR)' 1
+      if ($l -match '^UERR') { Write-Output ((Stamp) + " PUSHFAIL $l"); return }
+      if ($l -match '^UACK (\d+)' -and [int]$Matches[1] -ge $want) { $ok = $true }
+    }
+    if (-not $ok) { Write-Output ((Stamp) + " PUSHFAIL no ack at $want"); return }
+  }
+  $end = Wait-Line '^(UDONE|UERR)' 8
+  if ($end -match '^UDONE') { Write-Output ((Stamp) + " PUSHOK") } else { Write-Output ((Stamp) + " PUSHFAIL end=$end") }
+}
 $end = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $end) {
   try { $line = $sp.ReadLine().TrimEnd("`r"); if ($line) { Write-Output ((Get-Date).ToString("HH:mm:ss.fff") + " " + $line) } } catch [System.TimeoutException] {}
   if ($CmdFile -and (Test-Path $CmdFile)) {
     $cmds = Get-Content $CmdFile; Remove-Item $CmdFile
-    foreach ($c in $cmds) { if ($c) { $sp.Write($c + "`n"); Write-Output ((Get-Date).ToString("HH:mm:ss.fff") + " >> " + $c) } }
+    foreach ($c in $cmds) {
+      if ($c -match '^!push (.+)$') { Push-File $Matches[1].Trim() }
+      elseif ($c) { $sp.Write($c + "`n"); Write-Output ((Stamp) + " >> " + $c) }
+    }
   }
 }
 $sp.Close()

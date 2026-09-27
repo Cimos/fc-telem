@@ -79,3 +79,12 @@ values, `p1`/`p2`/`p3` jump to a page, `e` show the last Lua error.
 
 INAV flight controllers use the same USB id (0483:5740). With both plugged in, the
 console picks the port that is sending script lines.
+
+### Updating the script over the same cable
+
+With the console running, `tools/push.sh` sends the current `inav.lua` to the radio
+through the script's own updater: 128-byte chunks, each acknowledged, a checksum at
+the end, then a copy over `SCRIPTS/TELEMETRY/inav.lua`. The console prints `PUSHOK`
+or `PUSHFAIL`. A bad checksum leaves the old file in place. Select the model again
+on the radio (or power-cycle) to run the new version. The updater only exists from
+this version on, so the first install still goes over USB Storage.
