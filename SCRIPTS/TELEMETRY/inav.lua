@@ -1,7 +1,7 @@
 -- MAD_CAPPY INAV telemetry for 128x64 EdgeTX radios.
 -- Values are in the units delivered by the named EdgeTX sensors.
 local CFG = {
-  capacity = 2200,       -- usable pack capacity, mAh
+  capacity = 1000,       -- usable pack capacity, mAh (MAD_CAPPY battery profile)
   lqWarn = 70,           -- link-quality warning, percent
   lqRepeat = 1000,       -- 10 ms ticks (10 seconds)
   cellWarn = 3.50,       -- low-cell warning, volts
