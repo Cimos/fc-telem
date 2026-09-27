@@ -368,6 +368,34 @@ TESTS += [test_edgetx_traps, test_page_keys_via_metatable_globals,
           test_error_trap_shows_message, test_late_sensor_discovery]
 
 
+def test_msp_variant_detects_inav_without_ping():
+    """INAV never answers the CRSF device ping; MSP_FC_VARIANT must identify it."""
+    h = Harness({"FM": "ANGL!", "RQly": 100})
+    h.module.init()
+    for _ in range(4):                      # 4 s with no ping reply
+        h.now += 100; h.module.background()
+    sent = [p for t, p in h.pushes if t == 0x7A]
+    assert sent and sent[-1][3] == 0 and sent[-1][4] == 2, sent[-1:]   # v1: size 0, cmd 2
+    reply = h.lua.table_from([0xEA, 0xC8, 0x30, 4, 2, ord("I"), ord("N"), ord("A"), ord("V")])
+    h.pops.append((0x7B, reply))
+    h.now += 10; h.module.background()
+    assert h.test.getProfile() == ("inav", "msp"), h.test.getProfile()
+    out = "".join(h.serial_out)
+    assert "FC VARIANT INAV" in out and "PROFILE inav (msp)" in out, out[-300:]
+
+
+def test_msp_variant_detects_betaflight():
+    h = Harness({"FM": "ANGL!", "RQly": 100})
+    h.module.init()
+    for _ in range(4):
+        h.now += 100; h.module.background()
+    h.pops.append((0x7B, h.lua.table_from([0xEA, 0xC8, 0x30, 4, 2, ord("B"), ord("T"), ord("F"), ord("L")])))
+    h.now += 10; h.module.background()
+    assert h.test.getProfile() == ("bf", "msp"), h.test.getProfile()
+
+TESTS += [test_msp_variant_detects_inav_without_ping, test_msp_variant_detects_betaflight]
+
+
 def test_device_info_detection_and_origin_filter():
     cases = [("INAV 9.1.1: JBF7", "inav"), ("Betaflight: JBF7", "bf"),
              ("BTFL", "bf"), ("ArduPlane V4.6.0", "ap"),
@@ -389,7 +417,7 @@ def test_fm_fallback_detection():
     for fm, want in (("FBWA*", "ap"), ("LOTR*", "inav"), ("AIR*", "bf"),
                      ("ACRO?", "bf"), ("RTL ", "ap")):
         h = Harness({"FM": fm, "RQly": 100})
-        h.module.init(); h.now += 801; h.module.background()
+        h.module.init(); h.now += 1001; h.module.background()
         assert h.test.getProfile() == (want, "fm"), (fm, h.test.getProfile())
 
 

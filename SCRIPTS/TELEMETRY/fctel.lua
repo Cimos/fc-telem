@@ -149,6 +149,19 @@ local function sendRequest(cmd)
 end
 
 local function parseReply(cmd, b)
+  -- MSP_FC_VARIANT (2): four letters, "INAV" or "BTFL". Used to identify INAV,
+  -- which never answers the CRSF device ping. Handled before a profile exists.
+  if cmd == 2 then
+    if #b >= 4 then
+      local v = string.char(b[1], b[2], b[3], b[4])
+      if ev then ev("FC VARIANT " .. v) end
+      if not profile and CFG.profile == "auto" then
+        if v == "INAV" then loadProfile("inav", "msp", "INAV")
+        elseif v == "BTFL" then loadProfile("bf", "msp", "Betaflight") end
+      end
+    end
+    return
+  end
   if not profile then return end
   local r=profile.parseReply(cmd,b) or {}
   if r.flags~=nil then statusFlags=r.flags; statusSeen=true end
@@ -421,8 +434,13 @@ local function background()
     lastTelem=now; wasLost=false
   elseif now-lastTelem>=500 then wasLost=true end
   if CFG.profile=="auto" and not profile then
+    -- 1. CRSF device ping: Betaflight and ArduPilot answer with their name.
     if now-lastPing>=200 then crossfireTelemetryPush(0x28,{0x00,RADIO}); lastPing=now end
-    if now-detectStart>=800 then local g=guessFM(fm); if g then loadProfile(g,"fm") end end
+    -- 2. After 3 s, MSP_FC_VARIANT: INAV (and Betaflight) answer "INAV"/"BTFL".
+    --    ArduPilot has no MSP over CRSF, so this just times out there.
+    if live and now-detectStart>=300 and not waiting and now-reqAt>=150 then sendRequest(2) end
+    -- 3. After 10 s, guess from the flight-mode string.
+    if now-detectStart>=1000 then local g=guessFM(fm); if g then loadProfile(g,"fm") end end
   end
   pollTelemetry(now); updateState(now); doAlerts(now); lastBg = now
   if mode ~= prevMode then ev("MODE " .. S(prevMode) .. " -> " .. S(mode)); prevMode = mode end
