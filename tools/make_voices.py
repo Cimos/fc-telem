@@ -13,7 +13,7 @@ from pathlib import Path
 import edge_tts, miniaudio
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "SOUNDS" / "en" / "inav"
+OUT = ROOT / "SOUNDS" / "en" / "fctel"
 RATE = 32000
 
 # file name (matches wavName in fctel.lua) -> spoken phrase
@@ -35,6 +35,46 @@ CLIPS = {
     "landing": "Landing",
     "failsafe": "Failsafe",
     "homereset": "Home reset",
+    "gpsrescue": "GPS rescue",
+    "passthru": "Passthrough",
+    "posholdfail": "Position hold fail",
+    "chirp": "Chirp",
+    "airmode": "Air mode",
+    "circle": "Circle",
+    "stabilize": "Stabilize",
+    "training": "Training",
+    "fbwb": "F-B-W-B",
+    "autotune": "Autotune",
+    "auto": "Auto",
+    "rtl": "R-T-L",
+    "takeoff": "Takeoff",
+    "avoidadsb": "Avoid A-D-S-B",
+    "guided": "Guided",
+    "initialising": "Initialising",
+    "qstabilize": "Q stabilize",
+    "qhover": "Q hover",
+    "qloiter": "Q loiter",
+    "qland": "Q land",
+    "qrtl": "Q R-T-L",
+    "qacro": "Q acro",
+    "qautotune": "Q autotune",
+    "thermal": "Thermal",
+    "loiterqland": "Loiter Q land",
+    "autoland": "Autoland",
+    "land": "Land",
+    "drift": "Drift",
+    "sport": "Sport",
+    "flip": "Flip",
+    "brake": "Brake",
+    "throw": "Throw",
+    "guidednogps": "Guided no GPS",
+    "smartrtl": "Smart R-T-L",
+    "flowhold": "Flow hold",
+    "follow": "Follow",
+    "zigzag": "Zigzag",
+    "systemid": "System I-D",
+    "autorotate": "Autorotate",
+    "turtle": "Turtle",
 }
 
 

@@ -1,6 +1,7 @@
--- MAD_CAPPY INAV telemetry for 128x64 EdgeTX radios.
+-- FCTEL multi-firmware telemetry for 128x64 EdgeTX radios.
 -- Values are in the units delivered by the named EdgeTX sensors.
 local CFG = {
+  profile = "auto",      -- auto | inav | bf | ap
   capacity = 1000,       -- usable pack capacity, mAh (MAD_CAPPY battery profile)
   lqWarn = 70,           -- link-quality warning, percent
   lqRepeat = 1000,       -- 10 ms ticks (10 seconds)
@@ -41,78 +42,17 @@ local function bxor(a, b)
   end
   return r
 end
-local function has(v, bit) return band(v or 0, 2 ^ bit) ~= 0 end
 local function u16(b, i) return (b[i] or 0) + 256 * (b[i + 1] or 0) end
-local function u32(b, i)
-  return u16(b, i) + 65536 * u16(b, i + 2)
-end
 
 local sensorNames = {"FM", "RxBt", "Curr", "Capa", "Bat%", "GPS", "GSpd",
   "Hdg", "Alt", "Sats", "RQly", "1RSS", "RSNR", "TPWR", "VSpd"}
 local sid, val = {}, {}
 
-local modeLong = {
-  ACRO="ACRO", ANGL="ANGLE", HOR="HORIZON", ANGH="ANGLE HOLD",
-  MANU="MANUAL", AH="ALT HOLD", CRUZ="CRUISE", CRSH="COURSE HOLD",
-  LOTR="LOITER", HOLD="POS HOLD", WP="WAYPOINT", RTH="RTH",
-  WRTH="WP RTH", LAND="LANDING", ["!FS!"]="FAILSAFE", HRST="HOME RESET"
-}
-local reasonLong = {
-  ["!GPS"]="NO GPS FIX", ["!SW"]="ARM SWITCH ON", ["!THR"]="THROTTLE HIGH",
-  ["!STK"]="STICKS OFF CENTRE", ["!RC"]="NO RC LINK", ["!CAL"]="CALIBRATING",
-  ["!ACC"]="ACC NOT CAL", ["!MAG"]="MAG NOT CAL", ["!LVL"]="NOT LEVEL",
-  ["!NAV"]="NAV UNSAFE", ["!FS"]="FAILSAFE", ["!CLI"]="CLI OPEN",
-  ["!MNU"]="MENU OPEN", ["!PRE"]="NO PREARM", ["!TRM"]="AUTOTRIM",
-  ["!GEO"]="GEOZONE", ["!LND"]="LANDED", ["!DSB"]="DSHOT BEEPER",
-  ["!HW"]="HARDWARE", ["!SET"]="BAD SETTING", ["!PWM"]="PWM ERROR",
-  ["!MEM"]="LOW MEMORY", ["!OVL"]="CPU OVERLOAD", ["!ERR"]="ERROR"
-}
-local wavName = {
-  ACRO="acro", ANGLE="angle", HORIZON="horizon", ["ANGLE HOLD"]="anglehold",
-  MANUAL="manual", ["ALT HOLD"]="althold", CRUISE="cruise", ["COURSE HOLD"]="coursehold",
-  LOITER="loiter", ["POS HOLD"]="poshold", WAYPOINT="waypoint", RTH="rth",
-  ["WP RTH"]="wprth", LANDING="landing", FAILSAFE="failsafe", ["HOME RESET"]="homereset"
-}
-local flagReasons = {
-  {7,"FAILSAFE"}, {16,"FAILSAFE"}, {18,"NO RC LINK"}, {15,"HARDWARE"},
-  {26,"BAD SETTING"}, {27,"PWM ERROR"}, {25,"LOW MEMORY"}, {10,"CPU OVERLOAD"},
-  {14,"ARM SWITCH ON"}, {20,"CLI OPEN"}, {21,"MENU OPEN"}, {22,"MENU OPEN"},
-  {9,"CALIBRATING"}, {13,"ACC NOT CAL"}, {12,"MAG NOT CAL"}, {8,"NOT LEVEL"},
-  {11,"NAV UNSAFE"}, {6,"GEOZONE"}, {19,"THROTTLE HIGH"},
-  {23,"STICKS OFF CENTRE"}, {24,"AUTOTRIM"}, {28,"NO PREARM"},
-  {29,"DSHOT BEEPER"}, {30,"LANDED"}
-}
-
-local function decodeFM(s)
-  if type(s) ~= "string" or s == "" then return "UNKNOWN", "", false, false end
-  local reason = reasonLong[s]
-  if reason then return "BLOCKED", reason, false, true end
-  local last = ssub(s, -1)
-  -- Older fork builds send "<MODE>!" when arming is blocked, with no reason code.
-  if last == "!" and ssub(s, 1, 1) ~= "!" then
-    local k = ssub(s, 1, -2)
-    return modeLong[k] or k, "ARMING BLOCKED", false, true
-  end
-  local ready = last == "*"
-  local key = ready and ssub(s, 1, -2) or s
-  local known = modeLong[key]
-  return known or key, "", not ready and (known ~= nil or ssub(key,1,1) ~= "!"), false
-end
-
--- No table library on 128x64 EdgeTX (colour radios only): build the string by hand.
-local function decodeFlags(flags)
-  local out, n, last = "", 0, nil
-  for i=1,#flagReasons do
-    if has(flags, flagReasons[i][1]) then
-      local text = flagReasons[i][2]
-      if text ~= last then
-        out = (n == 0) and text or (out .. ", " .. text)
-        n = n + 1; last = text
-      end
-      if n == 3 then break end
-    end
-  end
-  return out
+-- Only the selected firmware profile is retained. Until then raw FM is displayed.
+local profile, profileKey, profileSource = nil, nil, nil
+local function rawDecode(s)
+  if type(s)~="string" or s=="" then return "UNKNOWN","",nil,false end
+  return s,"",nil,false
 end
 
 local function homeMath(lat1, lon1, lat2, lon2)
@@ -137,13 +77,55 @@ end
 -- MSP-over-CRSF -------------------------------------------------------------
 local MSP_REQ, MSP_RESP = 0x7A, 0x7B
 local FC, RADIO = 0xC8, 0xEA
-local commands = {0x2000, 107, 121}
 local txSeq, reqAt, reqIndex, waiting, lastReply = 0, 0, 0, nil, -100000
 local rx, rxSize, rxCmd, rxSeq, rxStarted = {}, 0, 0, 0, false
 local statusFlags, statusSeen, mspArmed, navMode, navState = 0, false, false, 0, 0
-local mspDistance, mspBearing
+local mspDistance, mspBearing, mspReason
 local mspTx, mspRx, mspTimeouts, mspMiss = 0, 0, 0, 0
 local verbose, ev = false, nil  -- ev(line) set below
+local detectStart, lastPing, lastTelem, wasLost = 0, -100000, 0, false
+
+local function loadProfile(key, source, detectedName)
+  if key==profileKey and profile then return true end
+  profile,profileKey,profileSource=nil,nil,nil; collectgarbage()
+  local loader=loadScript("/SCRIPTS/FCTEL/"..key..".lua")
+  if type(loader)~="function" then if ev then ev("PROFILE LOAD ERROR "..key) end return false end
+  local ok,p=pcall(loader)
+  if not ok or type(p)~="table" then if ev then ev("PROFILE LOAD ERROR "..key) end return false end
+  profile=p; profileKey=key; profileSource=source
+  reqIndex,waiting,rxStarted,statusSeen,mspDistance,mspBearing=0,nil,false,false,nil,nil
+  mspReason=nil
+  if detectedName and ev then ev("DETECT "..detectedName.." -> "..key) end
+  if ev then ev("PROFILE "..key.." ("..source..")") end
+  return true
+end
+local function pingProfile(name)
+  if type(name)~="string" then return nil end
+  if ssub(name,1,4)=="INAV" then return "inav" end
+  if ssub(name,1,10)=="Betaflight" or ssub(name,1,4)=="BTFL" then return "bf" end
+  if ssub(name,1,4)=="Ardu" or ssub(name,1,5)=="Rover" or string.find(name,"Plane",1,true) or string.find(name,"Copter",1,true) then return "ap" end
+end
+local apFM={FBWA=true,FBWB=true,CIRC=true,STAB=true,TRAN=true,CRUS=true,ATUN=true,AUTO=true,
+  RTL=true,LOIT=true,TKOF=true,AVOI=true,GUID=true,INIT=true,QSTB=true,QHOV=true,QLOT=true,QLND=true,
+  QRTL=true,QACO=true,QATN=true,THML=true,L2QL=true,ALND=true,LAND=true,DRIF=true,SPRT=true,
+  FLIP=true,PHLD=true,BRAK=true,THRW=true,GNGP=true,SRTL=true,FHLD=true,FOLL=true,ZIGZ=true,
+  SYSI=true,AROT=true,TRTL=true}
+local inavFM={LOTR=true,CRUZ=true,CRSH=true,WRTH=true,AH=true,ANGH=true,HRST=true}
+local bfFM={AIR=true,PASS=true,POSH=true,PHFL=true,CHIR=true}
+local function guessFM(s)
+  if type(s)~="string" then return nil end
+  local last=ssub(s,-1); if last=="*" or last=="!" or last=="?" then s=ssub(s,1,-2) end
+  while #s>0 and ssub(s,-1)==" " do s=ssub(s,1,-2) end
+  if apFM[s] then return "ap" end
+  if inavFM[s] or (ssub(s,1,1)=="!" and #s>=3 and #s<=4) then return "inav" end
+  if bfFM[s] or last=="?" then return "bf" end
+end
+local function deviceInfo(p)
+  if type(p)~="table" or p[2]~=FC then return end
+  local name=""; local i=3
+  while p[i] and p[i]~=0 do name=name..string.char(p[i]); i=i+1 end
+  local key=pingProfile(name); if key then loadProfile(key,"ping",name) end
+end
 
 local function encodeRequest(cmd, seq)
   local p = {FC, RADIO}
@@ -167,17 +149,15 @@ local function sendRequest(cmd)
 end
 
 local function parseReply(cmd, b)
-  if cmd == 0x2000 and #b >= 13 then
-    -- INAV 9.1.1 fc_msp.c MSP2_INAV_STATUS: u16 cycleTime, u16 i2cErrors,
-    -- u16 sensorStatus, u16 load, u8 profiles, then u32 armingFlags (offset 10),
-    -- then the box-mode bitmask and u8 mixer profile.
-    statusFlags = u32(b, 10); statusSeen = true
-    mspArmed = has(statusFlags, 2)
-  elseif cmd == 107 and #b >= 5 then
-    mspDistance, mspBearing = u16(b,1), u16(b,3)
-  elseif cmd == 121 and #b >= 7 then
-    navMode, navState = b[1] or 0, b[2] or 0
-  end
+  if not profile then return end
+  local r=profile.parseReply(cmd,b) or {}
+  if r.flags~=nil then statusFlags=r.flags; statusSeen=true end
+  if r.armed~=nil then mspArmed=r.armed; statusSeen=true end
+  if r.distance~=nil then mspDistance=r.distance end
+  if r.bearing~=nil then mspBearing=r.bearing end
+  if r.navMode~=nil then navMode=r.navMode end
+  if r.navState~=nil then navState=r.navState end
+  if r.reason~=nil then mspReason=r.reason end
 end
 
 local function receiveChunk(p, now)
@@ -203,24 +183,26 @@ local function receiveChunk(p, now)
   return false
 end
 
-local function pollMSP(now)
+local function pollTelemetry(now)
   while true do
     local typ, p = crossfireTelemetryPop()
     if not typ then break end
     if typ == MSP_RESP then receiveChunk(p, now) end
+    if typ == 0x29 then deviceInfo(p) end
   end
   if waiting and now - reqAt > CFG.mspTimeout then
     if ev then ev("MSP TIMEOUT " .. waiting) end
     waiting = nil; rxStarted = false; mspTimeouts = mspTimeouts + 1; mspMiss = mspMiss + 1
   end
   local gap = (mspMiss >= 6) and 500 or CFG.mspGap
-  if not waiting and now - reqAt >= gap then
+  local commands=profile and profile.msp
+  if commands and #commands>0 and not waiting and now - reqAt >= gap then
     reqIndex = reqIndex % #commands + 1; sendRequest(commands[reqIndex])
   end
 end
 
 -- State and alerts ----------------------------------------------------------
-local page, cells, armed, prevArmed = 1, 0, false, false
+local page, cells, armed, prevArmed = 1, 0, nil, nil
 local mode, reason, blocked = "UNKNOWN", "", false
 local homeLat, homeLon, homeSet, distance, bearing = nil, nil, false, nil, nil
 local armedTicks, armTick, lastBg = 0, 0, 0
@@ -236,8 +218,8 @@ local function tone(kind)
   else playTone(1800,100,20) end
 end
 local function sayMode(m, urgent)
-  local f = wavName[m]
-  if m == "ANGLE" and CFG.angleAsFbwa then f = "fbwa" end
+  local f = profile and profile.voice[m]
+  if profileKey=="inav" and m == "ANGLE" and CFG.angleAsFbwa then f = "fbwa" end
   if ev then ev("SAY " .. tostring(f or m)) end
   local played = false
   if CFG.useWav and f and io and io.open then
@@ -262,27 +244,24 @@ local function V(name)
 end
 
 local function updateState(now)
-  local fmMode, fmReason, fmArmed, fmBlocked = decodeFM(V("FM"))
+  local decoder=profile and profile.decodeFM or rawDecode
+  local fmMode, fmReason, fmArmed, fmBlocked = decoder(V("FM"))
   local fresh = statusSeen and now - lastReply < 500
   mode, reason, blocked = fmMode, fmReason, fmBlocked
   armed = fresh and mspArmed or fmArmed
   if fresh then
-    reason = decodeFlags(statusFlags); blocked = not armed and reason ~= ""
-    if navMode == 2 then mode = "RTH"
-    elseif navMode == 3 then mode = "WAYPOINT"
-    elseif navMode == 1 then mode = "POS HOLD"
-    elseif navMode == 15 then mode = "FAILSAFE" end
+    reason = mspReason or reason; blocked = not armed and reason ~= ""
   end
   local gps = V("GPS")
-  if armed and not prevArmed then
+  if armed==true and prevArmed~=true then
     armTick = now; startCapa = V("Capa") or 0; flownKm = 0
     if type(gps)=="table" and gps.lat and gps.lon then
       homeLat, homeLon, homeSet = gps.lat, gps.lon, true
       lastLat, lastLon = gps.lat, gps.lon
     end
-  elseif not armed and prevArmed then
+  elseif armed~=true and prevArmed==true then
     armedTicks = armedTicks + now - armTick; lastLat, lastLon = nil, nil
-  elseif armed and type(gps)=="table" and gps.lat and gps.lon then
+  elseif armed==true and type(gps)=="table" and gps.lat and gps.lon then
     if lastLat then
       local step = homeMath(lastLat,lastLon,gps.lat,gps.lon)
       if step and step < 1000 then flownKm = flownKm + step/1000 end
@@ -290,6 +269,9 @@ local function updateState(now)
     lastLat, lastLon = gps.lat, gps.lon
   end
   prevArmed = armed
+  if not homeSet and armed==nil and (V("Sats") or 0)>=6 and type(gps)=="table" and gps.lat and gps.lon then
+    homeLat,homeLon,homeSet=gps.lat,gps.lon,true
+  end
   if armed then -- current flight time is accumulated only at display time
   end
   if fresh and mspDistance then distance, bearing, homeSet = mspDistance, mspBearing, true
@@ -331,7 +313,9 @@ local function init()
     local f = getFieldInfo(sensorNames[i])
     sid[i] = f and f.id or nil
   end
-  lastBg = getTime(); reqAt = lastBg - 50
+  lastBg = getTime(); reqAt = lastBg - 50; detectStart=lastBg; lastTelem=lastBg
+  if CFG.profile~="auto" then loadProfile(CFG.profile,"forced")
+  else crossfireTelemetryPush(0x28,{0x00,RADIO}); lastPing=lastBg end
 end
 
 local lastResolve, lastDump, dumpLines, lastErr = 0, 0, 0, nil
@@ -369,15 +353,21 @@ local prevMode, prevReason = nil, nil
 local function sensorList()
   for i=1,#sensorNames do ulog("SENSOR " .. sensorNames[i] .. " id=" .. S(sid[i]) .. " val=" .. S(val[i])) end
 end
--- Over-USB update. Host sends "U <size> <sum>\n", then raw bytes in chunks of at most
+-- Over-USB update. Host sends "U <size> <sum> [path]\n", then raw bytes in chunks of at most
 -- 128 (the Lua serial FIFO is 256). Each read is acked with "UACK <bytes so far>".
--- The file lands in fctel.tmp, is checked, then copied over fctel.lua a block at a time.
-local UPTMP, UPDST = "/SCRIPTS/TELEMETRY/fctel.tmp", "/SCRIPTS/TELEMETRY/fctel.lua"
+-- The file lands at path.tmp, is checked, then copied over path a block at a time.
 local up = nil
-local function upStart(size, sum)
-  local fh = io.open(UPTMP, "w")
+local function validPath(path)
+  return path=="/SCRIPTS/TELEMETRY/fctel.lua"
+    or string.match(path,"^/SCRIPTS/FCTEL/[A-Za-z0-9_%-]+%.lua$")~=nil
+    or string.match(path,"^/SOUNDS/en/fctel/[A-Za-z0-9_%-]+%.wav$")~=nil
+end
+local function upStart(size, sum, path)
+  path=path or "/SCRIPTS/TELEMETRY/fctel.lua"
+  if not validPath(path) then ulog("UERR path"); return end
+  local tmp=path..".tmp"; local fh = io.open(tmp, "w")
   if not fh then ulog("UERR open"); return end
-  up = {size = size, sum = sum, got = 0, acc = 0, fh = fh, phase = 1}
+  up = {size=size,sum=sum,got=0,acc=0,fh=fh,phase=1,tmp=tmp,dstPath=path}
   ulog("UOK " .. size)
 end
 local function upStep()
@@ -394,7 +384,7 @@ local function upStep()
     if up.got >= up.size then
       io.close(up.fh)
       if up.acc ~= up.sum then ulog("UERR sum " .. up.acc .. " want " .. up.sum); up = nil; return end
-      up.src, up.dst, up.copied, up.phase = io.open(UPTMP, "r"), io.open(UPDST, "w"), 0, 2
+      up.src, up.dst, up.copied, up.phase = io.open(up.tmp, "r"), io.open(up.dstPath, "w"), 0, 2
       if not up.src or not up.dst then ulog("UERR copy"); up = nil end
     end
   else
@@ -407,8 +397,8 @@ local function upStep()
   end
 end
 local function command(c)
-  local size, sum = string.match(c, "^U (%d+) (%d+)")
-  if size then upStart(tonumber(size), tonumber(sum)); return end
+  local size, sum, path = string.match(c, "^U (%d+) (%d+)%s*(.-)%s*$")
+  if size then upStart(tonumber(size), tonumber(sum),path~="" and path or nil); return end
   c = string.gsub(c, "[%s]+", "")
   if c == "" then return end
   if c == "d" then dump(getTime())
@@ -421,7 +411,20 @@ end
 local function background()
   local now = getTime()
   if now - lastResolve >= 200 then resolveSensors(); lastResolve = now end
-  readSensors(); pollMSP(now); updateState(now); doAlerts(now); lastBg = now
+  readSensors()
+  local fm,lq=V("FM"),V("RQly"); local live=type(fm)=="string" and fm~="" and lq~=0
+  if live then
+    if wasLost and CFG.profile=="auto" then
+      profile,profileKey,profileSource=nil,nil,nil; collectgarbage(); detectStart=now; lastPing=-100000
+      waiting=nil; statusSeen=false; mspReason=nil
+    end
+    lastTelem=now; wasLost=false
+  elseif now-lastTelem>=500 then wasLost=true end
+  if CFG.profile=="auto" and not profile then
+    if now-lastPing>=200 then crossfireTelemetryPush(0x28,{0x00,RADIO}); lastPing=now end
+    if now-detectStart>=800 then local g=guessFM(fm); if g then loadProfile(g,"fm") end end
+  end
+  pollTelemetry(now); updateState(now); doAlerts(now); lastBg = now
   if mode ~= prevMode then ev("MODE " .. S(prevMode) .. " -> " .. S(mode)); prevMode = mode end
   if reason ~= prevReason then ev("REASON '" .. S(reason) .. "'"); prevReason = reason end
   if up then upStep()
@@ -448,7 +451,7 @@ local function arrow(x,y,a)
   lcd.drawLine(x+floor(-sx*4+px*3),y+floor(-sy*4+py*3),x+floor(-sx*4-px*3),y+floor(-sy*4-py*3),SOLID or 0,Z)
 end
 local function flightSeconds(now)
-  return floor((armedTicks + (armed and now-armTick or 0))/100)
+  return floor((armedTicks + (armed==true and now-armTick or 0))/100)
 end
 local function timerText(s)
   local m=floor(s/60); return string.format("%02d:%02d",m,s-m*60)
@@ -463,8 +466,9 @@ end
 
 local function drawMain(now)
   local mf = (#mode > 10) and MID or DBL
-  txt(0,0,mode,mf); txt(94,0,num(V("RxBt"),true).."V"); txt(96,7,num(V("Curr"),true).."A")
-  txt(0,16,armed and "ARMED" or (blocked and "BLOCKED" or "READY"),armed and INVERS or Z)
+  txt(0,0,mode,mf); txt(78,0,num(V("RxBt"),true).."V"); txt(112,0,profile and profile.name or "--")
+  txt(96,7,num(V("Curr"),true).."A")
+  txt(0,16,armed==true and "ARMED" or (blocked and "BLOCKED" or (armed==nil and "--" or "READY")),armed==true and INVERS or Z)
   txt(48,16,"SAT "..num(V("Sats"))..((V("Sats") or 0)>=6 and "+" or "-")); txt(96,16,"LQ"..num(V("RQly")))
   txt(0,25,"ALT "..num(V("Alt")).."m"); txt(65,25,"SPD "..num(V("GSpd")))
   txt(0,34,"HOME "..num(distance).."m")
@@ -492,17 +496,17 @@ local function checklistRow(y,label,ok,fail)
   txt(0,y,label); txt(91,y,ok and "OK" or fail,ok and INVERS or Z)
 end
 local function isNavMode(m)
-  return m=="ALT HOLD" or m=="CRUISE" or m=="COURSE HOLD" or m=="LOITER" or m=="POS HOLD" or m=="WAYPOINT" or m=="RTH" or m=="WP RTH" or m=="LANDING"
+  return profile and profile.navModes[m] or false
 end
 local function drawChecklist()
   local sats=V("Sats") or 0; local vb=V("RxBt"); local lq=V("RQly") or 0
   local gps=sats>=6; local bat=cells>0 and type(vb)=="number" and vb/cells>=CFG.cellReady
-  local link=lq>=90; local modeok=not isNavMode(mode); local armok=not blocked
+  local link=lq>=90; local modeok=not isNavMode(mode); local armok=armed~=nil and not blocked
   local all=gps and homeSet and bat and link and modeok and armok
   txt(0,0,all and "READY TO FLY" or "PRE-FLIGHT",INVERS)
   checklistRow(9,"GPS FIX",gps,"NO FIX"); checklistRow(18,"HOME",homeSet,"NOT SET")
   checklistRow(27,"BATTERY",bat,"LOW"); checklistRow(36,"LINK",link,"WEAK")
-  checklistRow(45,"MODE",modeok,"NAV ON"); checklistRow(54,"ARMING",armok,reason~="" and reason or "BLOCKED")
+  checklistRow(45,"MODE",modeok,"NAV ON"); checklistRow(54,"ARMING",armok,armed==nil and "--" or (reason~="" and reason or "BLOCKED"))
 end
 
 local function run(event)
@@ -534,8 +538,18 @@ end
 local function safeBg() trap(background) end
 local function safeInit() trap(init); dlog("START " .. tostring(getTime())) end
 
+local function testDecode(s) if not profile then loadProfile("inav","test") end return profile.decodeFM(s) end
+local function testFlags(f) if not profile then loadProfile("inav","test") end return profile._flagText and profile._flagText(f) or "" end
+local function testReceive(p,n) if not profile then loadProfile("inav","test") end return receiveChunk(p,n) end
 return {init=safeInit,run=safeRun,background=safeBg,
-  _test={decodeFM=decodeFM,encodeRequest=encodeRequest,receiveChunk=receiveChunk,
-    decodeFlags=decodeFlags,homeMath=homeMath,cellCount=cellCount,getPage=function() return page end,
+  _test={decodeFM=testDecode,encodeRequest=encodeRequest,receiveChunk=testReceive,
+    decodeFlags=testFlags,homeMath=homeMath,cellCount=cellCount,getPage=function() return page end,
     getReply=function() return rxCmd,rx end,
-    getStatus=function() return statusFlags,mspArmed end}}
+    getStatus=function() return statusFlags,mspArmed end,
+    getState=function() return mode,reason,armed,blocked end,
+    getMspCounts=function() return mspTx,mspRx,mspTimeouts end,
+    profileDecode=function(s) if profile then return profile.decodeFM(s) end end,
+    voiceFor=function(m) return profile and profile.voice[m] end,
+    getProfileTable=function() return profile end,
+    getProfile=function() return profileKey,profileSource end,
+    forceProfile=loadProfile,guessFM=guessFM,validPath=validPath}}

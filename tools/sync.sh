@@ -14,12 +14,13 @@ while [ -z "$CARD" ] && [ $SECONDS -lt $end ]; do CARD="$(find_card)"; [ -z "$CA
 echo "card: $CARD"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 WSRC="$(wslpath -w "$ROOT/SCRIPTS/TELEMETRY/fctel.lua")"
+WPROF="$(wslpath -w "$ROOT/SCRIPTS/FCTEL")"
 WDBG="$(wslpath -w "$ROOT/debug")"
 WSND="$(wslpath -w "$ROOT/SOUNDS/en/fctel")"
 powershell.exe -NoProfile -Command "
   \$log = '${CARD}LOGS\fctel_dbg.txt'
   if (Test-Path \$log) { Copy-Item \$log '$WDBG\fctel_dbg-$STAMP.txt'; Write-Output 'pulled log' } else { Write-Output 'no log on card' }
-  if ($PUSH -eq 1) { New-Item -ItemType Directory -Force -Path '${CARD}SCRIPTS\TELEMETRY' | Out-Null; Copy-Item '$WSRC' '${CARD}SCRIPTS\TELEMETRY\fctel.lua' -Force; if (Test-Path \$log) { Remove-Item \$log }; Write-Output 'pushed script, cleared log'; New-Item -ItemType Directory -Force -Path '${CARD}SOUNDS\en\fctel' | Out-Null; Copy-Item '$WSND\*.wav' '${CARD}SOUNDS\en\fctel\' -Force; Write-Output ('pushed ' + (Get-ChildItem '${CARD}SOUNDS\en\fctel' -Filter *.wav).Count + ' voice clips') }
+  if ($PUSH -eq 1) { New-Item -ItemType Directory -Force -Path '${CARD}SCRIPTS\TELEMETRY' | Out-Null; Copy-Item '$WSRC' '${CARD}SCRIPTS\TELEMETRY\fctel.lua' -Force; New-Item -ItemType Directory -Force -Path '${CARD}SCRIPTS\FCTEL' | Out-Null; Copy-Item '$WPROF\*.lua' '${CARD}SCRIPTS\FCTEL\' -Force; if (Test-Path \$log) { Remove-Item \$log }; Write-Output 'pushed script and profiles, cleared log'; New-Item -ItemType Directory -Force -Path '${CARD}SOUNDS\en\fctel' | Out-Null; Copy-Item '$WSND\*.wav' '${CARD}SOUNDS\en\fctel\' -Force; Write-Output ('pushed ' + (Get-ChildItem '${CARD}SOUNDS\en\fctel' -Filter *.wav).Count + ' voice clips') }
 " 2>&1 | tr -d '\r'
 L="$ROOT/debug/fctel_dbg-$STAMP.txt"
 if [ -f "$L" ]; then

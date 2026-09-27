@@ -1,102 +1,104 @@
-# MAD_CAPPY INAV telemetry
+# FCTEL multi-firmware telemetry
 
-`fctel.lua` is a three-page EdgeTX telemetry screen for a RadioMaster Boxer with a 128x64 display. It combines normal CRSF sensors with non-blocking MSP-over-CRSF requests to INAV.
+FCTEL is a three-page EdgeTX telemetry screen for a RadioMaster Boxer (128x64)
+using CRSF/ELRS. It supports INAV, Betaflight, and ArduPilot Plane/Copter while
+keeping only one small firmware profile in Lua memory.
 
-The main page shows flight mode, arm state or refusal reason, GPS and link state, altitude, speed, home distance and direction, battery use, remaining capacity, and an armed-only flight timer. The second page concentrates on link and battery data, including estimated range. The third page is a pre-flight checklist. Alerts continue in `background()` while another radio screen is open.
+The main page shows mode, detected firmware, arm state, GPS/link, altitude,
+speed, home direction/distance, battery use, and flight time. Page two shows
+link and battery detail; page three is a pre-flight checklist. Use the scroll
+wheel for the three script pages. EdgeTX PAGE keys remain available for moving
+between telemetry screens. Alerts continue from `background()`.
 
-## Install
+## Files and installation
 
-1. Copy `SCRIPTS/TELEMETRY/fctel.lua` to the same path on the radio SD card.
-2. In the model setup, discover the CRSF telemetry sensors. Keep their standard names (`FM`, `RxBt`, `Curr`, `Capa`, `Bat%`, `GPS`, `GSpd`, `Hdg`, `Alt`, `Sats`, `RQly`, `1RSS`, `RSNR`, `TPWR`, and `VSpd`). Missing sensors are allowed.
-3. Open the model's **Telemetry screens** page, add a **Script** screen, and select `inav`.
-4. Set the ExpressLRS telemetry ratio to 1:2 or 1:4. A slower ratio makes MSP updates less responsive.
-5. Use Page Next/Page Previous to change pages. Enter also advances a page on the Boxer.
+Copy these paths to the same locations on the radio SD card:
 
-The custom fork firmware is required for the compact arming-reason values carried in `FM`. MSP status and arming reasons work with any INAV 9.x build that supports MSP over CRSF, so the script still provides useful detail without the fork.
+- `SCRIPTS/TELEMETRY/fctel.lua` — shared UI, sensors, detection, MSP transport,
+  logging, console, and updater.
+- `SCRIPTS/FCTEL/inav.lua` — INAV modes, arming reasons, and MSP decoding.
+- `SCRIPTS/FCTEL/bf.lua` — Betaflight modes, arming reasons, and MSP decoding.
+- `SCRIPTS/FCTEL/ap.lua` — ArduPilot Plane/Copter modes (no MSP polling).
+- `SOUNDS/en/fctel/*.wav` — optional mode announcements.
 
-## Configuration
+Discover the standard CRSF sensors (`FM`, `RxBt`, `Curr`, `Capa`, `Bat%`,
+`GPS`, `GSpd`, `Hdg`, `Alt`, `Sats`, `RQly`, `1RSS`, `RSNR`, `TPWR`, `VSpd`),
+then add `fctel` as a Script telemetry screen. Missing sensors are tolerated.
+An ELRS telemetry ratio of 1:2 or 1:4 gives responsive MSP updates.
 
-Edit the `CFG` table at the top of `fctel.lua` before copying it to the SD card:
+`tools/sync.sh` copies the core, every profile, and voice files through USB
+Storage. It also retrieves `/LOGS/fctel_dbg.txt`. Use `--no-push` to retrieve
+without copying.
 
-- `capacity`: usable battery capacity in mAh.
-- `lqWarn`: low link-quality threshold.
-- `cellWarn`: in-flight per-cell voltage warning.
-- `cellReady`: minimum per-cell voltage for the checklist.
-- `reservePercent`: remaining-capacity warning threshold.
-- `lqRepeat`, `batteryRepeat`, and `reserveRepeat`: alert repeat times in 10 ms EdgeTX ticks.
-- `useWav`: use mode WAV files when they are installed; otherwise use tones.
+## Detection and overrides
 
-Cell count is detected once from the first valid `RxBt` value. Range is an estimate based on consumed mAh and straight-line distance from home; it is deliberately omitted until enough data exists.
+In the default `CFG.profile = "auto"` mode the script broadcasts a CRSF device
+ping at startup and every two seconds until it receives flight-controller
+device info. Replies from other origins (including the ELRS TX/RX) are ignored.
+Names beginning with INAV, Betaflight/BTFL, or Ardu/Rover (and names containing
+Plane/Copter) select the corresponding on-demand profile.
 
-## Optional sounds
+If device info is absent for eight seconds, distinctive `FM` strings provide a
+fallback guess. Ambiguous modes such as `MANU` and `ALTH` do not decide a
+profile. After five seconds without an FM value or with RQly zero, detection is
+restarted when telemetry returns; this handles model or aircraft changes.
 
-Put these files in `/SOUNDS/en/fctel/`:
+Set `CFG.profile` to `"inav"`, `"bf"`, or `"ap"` to bypass detection. The
+console logs `DETECT <name> -> <profile>` and `PROFILE <profile> (ping|fm|forced)`.
 
-`acro.wav`, `angle.wav`, `horizon.wav`, `anglehold.wav`, `manual.wav`, `althold.wav`, `cruise.wav`, `coursehold.wav`, `loiter.wav`, `poshold.wav`, `waypoint.wav`, `rth.wav`, `wprth.wav`, `landing.wav`, `failsafe.wav`, and `homereset.wav`.
+## Firmware behavior and limits
 
-Missing files are harmless and fall back to a tone. RTH and failsafe also use haptic feedback.
+- INAV polls MSP2 INAV status, MSP_COMP_GPS, and navigation status. Compact
+  `!GPS`-style FM refusal strings are decoded when supplied by the firmware;
+  standard MSP status still supplies broad arming reasons.
+- Betaflight polls MSP_STATUS_EX and MSP_COMP_GPS. Its variable-length status
+  payload and 32-bit arming-disable flags are decoded, with up to three reasons
+  shown. FM suffix `?` means ready with GPS Rescue unavailable.
+- ArduPilot uses its four-character CRSF mode names and sends no MSP requests.
+  Arming is only known when the optional disarmed `*` suffix is enabled, so the
+  screen otherwise shows `--`. Home is captured at the first GPS fix of six or
+  more satellites when arm state is unknown. No ArduPilot arming-refusal reason
+  is available through this telemetry data.
 
-## Boxer memory
+Home distance from MSP is preferred where supported; otherwise it is calculated
+from the GPS sensor. Cell count is inferred once from the first usable pack
+voltage. Estimated range appears only after enough flight data exists.
 
-The script keeps one sensor table, one small MSP receive buffer, and fixed lookup tables. It avoids per-frame table construction in the normal update path. Do not add large bitmaps or debug logging on the Boxer; both consume scarce Lua RAM.
+## Configuration and voice
 
-## Bench debugging
+The `CFG` table controls capacity, battery/link thresholds and repeat times,
+WAV use, mode announcements, settle time, logging, console use, MSP timing, and
+the profile override. `angleAsFbwa` only changes the spoken clip for INAV ANGLE.
 
-`CFG.debugLog = true` makes the script append one status line per second to
-`/LOGS/fctel_dbg.txt` on the radio's SD card: raw FM string, decoded mode and arming
-reason, sats, LQ, RxBt, capacity, GPS, home, MSP requests/replies/timeouts, arming
-flags, nav state, page and Lua memory. Any Lua error is caught, shown on screen with
-its message, and written to the log as an `ERR` line instead of killing the script.
-The log restarts after about 15 minutes of lines.
+Each profile maps every known display mode to a lowercase clip basename. Missing
+clips fall back to a tone. `tools/make_voices.py` contains all INAV, Betaflight,
+and ArduPilot phrases; it requires network access and is intentionally not run
+as part of installation or tests.
 
-Loop: fly or bench with the radio, plug the radio into the PC, choose USB Storage,
-then run `tools/sync.sh`. It pulls the log into `debug/` (not committed), pushes the
-current script, clears the log, and prints any errors plus the last lines.
+## Debug console and updating
 
-The host tests run under Lua 5.3 like EdgeTX 2.11 and mimic its quirks on 128x64
-radios: no string methods (`s:sub()` fails), constants only reachable as plain
-globals, and file handles without methods.
+Set EdgeTX **SYS > Hardware > Serial ports > USB-VCP = LUA**, choose USB Serial
+when connecting, then run `tools/console.sh`. Status is also written once per
+second to `/LOGS/fctel_dbg.txt` when `CFG.debugLog` is enabled. Commands written
+one per line to `debug/cmd.txt` are: `d`, `v`, `s`, `p1`/`p2`/`p3`, and `e`.
 
-## Live USB console (bench testing)
+With the console running:
 
-The script can stream its status over the radio's USB port while you test, with the
-radio running normally.
+- `tools/push.sh [local-file] [radio-path]` queues one file. With no arguments it
+  pushes the core script.
+- `tools/push_all.sh` queues the core and all `SCRIPTS/FCTEL/*.lua` profiles in
+  order.
+- The raw console form is `!push <windows-file> [<radio-path>]`.
 
-One-time radio setup (EdgeTX 2.11): **SYS > Hardware > Serial ports > USB-VCP = LUA**.
+Updater destinations are restricted to the core path, a simple filename below
+`/SCRIPTS/FCTEL/`, or a simple WAV filename below `/SOUNDS/en/fctel/`. Data is
+written to `<destination>.tmp`, checksum-checked, then copied into place. Select
+the model again (or restart the radio) after replacing Lua files.
 
-Each session: plug the radio into the PC and choose **USB Serial (VCP)** on the
-popup, then on the PC run `tools/console.sh`. It finds the radio's COM port, prints
-every line with a timestamp and saves it to `debug/console-<time>.log`
-(`debug/console-latest.log` points at the newest).
+## Tests and memory
 
-Lines: `START`, a status line once a second (same fields as the SD log), `EV` events
-(mode change, arming reason change, MSP timeouts, and with verbose on every MSP
-request and reply), `ERR` Lua errors.
-
-Commands (write one per line to `debug/cmd.txt` while the console runs):
-`d` dump now, `v` toggle verbose MSP events, `s` list sensors with their ids and
-values, `p1`/`p2`/`p3` jump to a page, `e` show the last Lua error.
-
-INAV flight controllers use the same USB id (0483:5740). With both plugged in, the
-console picks the port that is sending script lines.
-
-### Updating the script over the same cable
-
-With the console running, `tools/push.sh` sends the current `fctel.lua` to the radio
-through the script's own updater: 128-byte chunks, each acknowledged, a checksum at
-the end, then a copy over `SCRIPTS/TELEMETRY/fctel.lua`. The console prints `PUSHOK`
-or `PUSHFAIL`. A bad checksum leaves the old file in place. Select the model again
-on the radio (or power-cycle) to run the new version. The updater only exists from
-this version on, so the first install still goes over USB Storage.
-
-## Voice
-
-Every flight-mode change is spoken once the switch has settled for 0.4 s, armed or
-not (`CFG.sayModes`). ANGLE is announced as "F-B-W-A", the ArduPilot name, unless
-`CFG.angleAsFbwa` is false. RTH and failsafe also buzz while armed.
-
-The clips live in `SOUNDS/en/fctel/` (17 files, Australian English neural voice,
-32 kHz 16-bit mono like the EdgeTX packs) and are copied to the card by
-`tools/sync.sh`. To change a phrase or the voice, edit `CLIPS` in
-`tools/make_voices.py` and run it (`--voice en-GB-SoniaNeural` etc.). A missing clip
-falls back to a tone.
+Run `./.venv/bin/python tests/run.py`. The Lua 5.3 harness models EdgeTX 2.11 on
+128x64 radios: no string metatable, no `table`/`os`/`coroutine`/`utf8`/`package`/
+`debug` libraries, plain-global constants, and methodless file handles. It also
+prints desktop-runtime memory for the core plus each selected profile; those
+numbers are comparative and are not a hardware RAM measurement.

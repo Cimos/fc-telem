@@ -38,11 +38,11 @@ function Wait-Line([string]$pattern, [double]$secs) {
   return $null
 }
 # Send a file to the script's updater: "U size sum", then 128-byte chunks, each acked.
-function Push-File([string]$path) {
+function Push-File([string]$path, [string]$destination = "/SCRIPTS/TELEMETRY/fctel.lua") {
   $bytes = [System.IO.File]::ReadAllBytes($path); $sum = 0
   foreach ($b in $bytes) { $sum = ($sum + $b) % 65536 }
   Write-Output ((Stamp) + " >> PUSH $path $($bytes.Length) bytes sum $sum")
-  $sp.Write("U $($bytes.Length) $sum`n")
+  $sp.Write("U $($bytes.Length) $sum $destination`n")
   if (-not (Wait-Line '^UOK' 4)) { Write-Output ((Stamp) + " PUSHFAIL no UOK"); return }
   for ($off = 0; $off -lt $bytes.Length; $off += 128) {
     $n = [Math]::Min(128, $bytes.Length - $off); $sp.Write($bytes, $off, $n); $want = $off + $n
@@ -63,7 +63,8 @@ while ((Get-Date) -lt $end) {
   if ($CmdFile -and (Test-Path $CmdFile)) {
     $cmds = Get-Content $CmdFile; Remove-Item $CmdFile
     foreach ($c in $cmds) {
-      if ($c -match '^!push (.+)$') { Push-File $Matches[1].Trim() }
+      if ($c -match '^!push\s+"([^"]+)"(?:\s+(\S+))?$') { Push-File $Matches[1] $Matches[2] }
+      elseif ($c -match '^!push\s+(\S+)(?:\s+(\S+))?$') { Push-File $Matches[1] $Matches[2] }
       elseif ($c) { $sp.Write($c + "`n"); Write-Output ((Stamp) + " >> " + $c) }
     }
   }

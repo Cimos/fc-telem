@@ -8,7 +8,7 @@ SCRIPT = ROOT / "SCRIPTS" / "TELEMETRY" / "fctel.lua"
 
 
 class Harness:
-    def __init__(self, sensors=None):
+    def __init__(self, sensors=None, profile="auto"):
         self.lua = lupa53.LuaRuntime(unpack_returned_tuples=True)
         # Like EdgeTX on 128x64 radios: strings have no methods (s:sub fails).
         self.lua.execute('getmetatable("").__index = nil')
@@ -26,6 +26,13 @@ class Harness:
         g.getValue = lambda key: self.sensors.get(key)
         g.crossfireTelemetryPush = self.push
         g.crossfireTelemetryPop = self.pop
+        def load_script(path):
+            prefix = "/SCRIPTS/FCTEL/"
+            if not str(path).startswith(prefix):
+                return None
+            src = ROOT / "SCRIPTS" / "FCTEL" / str(path)[len(prefix):]
+            return self.lua.compile(src.read_text(), name=str(path)) if src.is_file() else None
+        g.loadScript = load_script
         g.playFile = lambda *args: None
         g.playHaptic = lambda *args: None
         g.playTone = lambda *args: None
@@ -76,7 +83,8 @@ class Harness:
         lcd.drawText = lambda *args: self.draws.append(args)
         lcd.drawLine = lambda *args: self.draws.append(args)
         g.lcd = lcd
-        self.module = self.lua.execute(SCRIPT.read_text())
+        source = SCRIPT.read_text().replace('profile = "auto"', f'profile = "{profile}"', 1)
+        self.module = self.lua.execute(source)
         self.test = self.module["_test"]
 
     def field_info(self, name):
@@ -98,6 +106,14 @@ class Harness:
 
 def lua_list(table):
     return [table[i] for i in range(1, len(table) + 1)]
+
+
+def device_info(h, name, origin=0xC8):
+    return 0x29, h.lua.table_from([0xEA, origin] + list(name.encode()) + [0])
+
+
+def msp_v1_response(h, cmd, payload, seq=0):
+    return 0x7B, h.lua.table_from([0xEA, 0xC8, 0x30 + seq, len(payload), cmd] + payload)
 
 
 def test_fm_decode():
@@ -247,7 +263,7 @@ def test_page_keys_via_metatable_globals():
 
 
 def test_error_trap_shows_message():
-    h = Harness({"FM": "ACRO*"})
+    h = Harness({"FM": "ACRO*"}, profile="inav")
     h.module["init"]()
     h.lua.globals().lcd.drawText = lambda *a: h.draws.append(a) if a[2] != "ACRO" else (_ for _ in ()).throw(RuntimeError("boom"))
     h.module["run"](0)
@@ -268,7 +284,7 @@ def test_late_sensor_discovery():
 
 
 def test_usb_console():
-    h = Harness({"FM": "!GPS", "Sats": 3})
+    h = Harness({"FM": "!GPS", "Sats": 3}, profile="inav")
     h.module["init"]()
     h.now += 100
     h.module["background"]()
@@ -326,7 +342,7 @@ def test_old_fork_blocked_suffix():
 
 
 def test_mode_voice():
-    h = Harness({"FM": "ACRO*"})
+    h = Harness({"FM": "ACRO*"}, profile="inav")
     played = []
     wrap = h.lua.eval('function(f) return function(...) return f(...) end end')
     h.lua.globals().playFile = wrap(lambda p: played.append(str(p)))
@@ -351,8 +367,132 @@ TESTS += [test_usb_console, test_usb_update, test_usb_update_bad_sum]
 TESTS += [test_edgetx_traps, test_page_keys_via_metatable_globals,
           test_error_trap_shows_message, test_late_sensor_discovery]
 
+
+def test_device_info_detection_and_origin_filter():
+    cases = [("INAV 9.1.1: JBF7", "inav"), ("Betaflight: JBF7", "bf"),
+             ("BTFL", "bf"), ("ArduPlane V4.6.0", "ap"),
+             ("ArduCopter V4.6.0", "ap")]
+    for name, want in cases:
+        h = Harness({"FM": "ACRO", "RQly": 100})
+        h.module.init()
+        h.pops.append(device_info(h, name, origin=0xEE))
+        h.module.background()
+        assert h.test.getProfile()[0] is None, name
+        h.pops.append(device_info(h, name))
+        h.module.background()
+        assert h.test.getProfile() == (want, "ping"), (name, h.test.getProfile())
+        out = "".join(h.serial_out)
+        assert f"DETECT {name} -> {want}" in out and f"PROFILE {want} (ping)" in out
+
+
+def test_fm_fallback_detection():
+    for fm, want in (("FBWA*", "ap"), ("LOTR*", "inav"), ("AIR*", "bf"),
+                     ("ACRO?", "bf"), ("RTL ", "ap")):
+        h = Harness({"FM": fm, "RQly": 100})
+        h.module.init(); h.now += 801; h.module.background()
+        assert h.test.getProfile() == (want, "fm"), (fm, h.test.getProfile())
+
+
+def test_forced_profiles():
+    for key in ("inav", "bf", "ap"):
+        h = Harness({"FM": "ACRO", "RQly": 100}, profile=key)
+        h.module.init()
+        assert h.test.getProfile() == (key, "forced")
+        assert not any(t == 0x28 for t, _ in h.pushes)
+
+
+def test_betaflight_status_variable_flags():
+    h = Harness({"FM": "ACRO!", "RQly": 100}, profile="bf")
+    h.module.init()
+    payload = [0] * 24
+    payload[6] = 1                 # flightModeFlags bit 0: armed
+    payload[15] = 2                # byteCount, followed by two extra flag bytes
+    payload[16:18] = [0xAA, 0x55]
+    payload[18] = 1                # armingDisableFlagsCount
+    payload[19] = 2**2             # RX LOSS
+    typ, frame = msp_v1_response(h, 150, payload)
+    assert h.test.receiveChunk(frame, 1500)
+    flags, armed = h.test.getStatus()
+    assert flags == 4 and armed
+    h.module.background()
+    assert h.test.getState()[1] == "RX LOSS"
+
+
+def test_betaflight_fm_suffixes():
+    h = Harness(profile="bf"); h.module.init()
+    assert h.test.profileDecode("ANGL*") == ("ANGLE", "", False, False)
+    assert h.test.profileDecode("AIR!") == ("AIR MODE", "ARMING DISABLED", False, True)
+    assert h.test.profileDecode("RTH?") == ("GPS RESCUE", "RESCUE UNAVAILABLE", False, False)
+    assert h.test.profileDecode("!FS!") == ("FAILSAFE", "FAILSAFE", False, True)
+
+
+def test_ardupilot_decode_and_no_msp():
+    h = Harness({"FM": "RTL ", "RQly": 100}, profile="ap"); h.module.init()
+    assert h.test.profileDecode("RTL ") == ("RTL", "", None, False)
+    assert h.test.profileDecode("FBWA*") == ("FBWA", "", False, False)
+    for _ in range(20): h.now += 100; h.module.background()
+    assert not any(t == 0x7A for t, _ in h.pushes), h.pushes
+    assert h.test.getState()[2] is None
+
+
+def test_profile_voice_maps():
+    expected = {"inav": {"ANGLE": "angle", "WP RTH": "wprth"},
+                "bf": {"GPS RESCUE": "gpsrescue", "AIR MODE": "airmode"},
+                "ap": {"FBWB": "fbwb", "SMART RTL": "smartrtl", "AUTO": "auto"}}
+    for key, pairs in expected.items():
+        h = Harness(profile=key); h.module.init()
+        for mode, clip in pairs.items(): assert h.test.voiceFor(mode) == clip
+        voice = h.test.getProfileTable()["voice"]
+        for _, clip in voice.items():
+            assert str(clip).lower() == str(clip) and " " not in str(clip)
+
+
+def test_single_pop_loop_routes_detection_and_msp():
+    h = Harness({"FM": "ACRO*", "RQly": 100}); h.module.init()
+    payload = [0] * 24; payload[15] = 1; payload[16] = 9; payload[17] = 1; payload[18] = 4
+    h.pops.extend([device_info(h, "Betaflight: TEST"), msp_v1_response(h, 150, payload)])
+    h.module.background()
+    assert h.test.getProfile()[0] == "bf"
+    assert h.test.getMspCounts()[1] == 1
+    assert h.pops == []
+
+
+def test_redetection_after_telemetry_loss():
+    h = Harness({"FM": "ANGL*", "RQly": 100}); h.module.init()
+    h.pops.append(device_info(h, "INAV 9.1.1: ONE")); h.module.background()
+    assert h.test.getProfile()[0] == "inav"
+    h.sensors["FM"], h.sensors["RQly"] = None, 0
+    h.now += 501; h.module.background()
+    h.sensors["FM"], h.sensors["RQly"] = "AIR*", 100
+    h.pops.append(device_info(h, "Betaflight: TWO")); h.module.background()
+    assert h.test.getProfile() == ("bf", "ping")
+
+
+def test_updater_path_whitelist():
+    h = Harness(profile="inav"); h.module.init()
+    h.serial_in.append("U 1 120 /MODELS/model.yml\n"); h.module.background()
+    assert "UERR path" in "".join(h.serial_out)
+    assert "/MODELS/model.yml.tmp" not in h.files
+    body = "x"; h.serial_in.append("U 1 120 /SCRIPTS/FCTEL/bf.lua\n"); h.module.background()
+    h.serial_in.append(body); h.module.background(); h.module.background()
+    assert "".join(h.files["/SCRIPTS/FCTEL/bf.lua"]) == body
+    assert h.test.validPath("/SOUNDS/en/fctel/rtl.wav")
+    assert not h.test.validPath("/SCRIPTS/FCTEL/../bad.lua")
+
+
+TESTS += [test_device_info_detection_and_origin_filter, test_fm_fallback_detection,
+          test_forced_profiles, test_betaflight_status_variable_flags,
+          test_betaflight_fm_suffixes, test_ardupilot_decode_and_no_msp,
+          test_profile_voice_maps, test_single_pop_loop_routes_detection_and_msp,
+          test_redetection_after_telemetry_loss, test_updater_path_whitelist]
+
 if __name__ == "__main__":
     for test in TESTS:
         test()
         print(f"PASS {test.__name__}")
     print(f"{len(TESTS)} tests passed")
+    print("MEMORY REPORT (KiB, core plus selected profile)")
+    for key in ("inav", "bf", "ap"):
+        h = Harness(profile=key); h.module.init(); h.lua.eval('collectgarbage')("collect")
+        memory = h.lua.eval('collectgarbage')("count")
+        print(f"MEM {key.upper():4s} {memory:.1f}")
