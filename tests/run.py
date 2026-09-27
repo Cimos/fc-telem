@@ -300,6 +300,16 @@ def test_usb_update_bad_sum():
     out = "".join(h.serial_out)
     assert "UERR sum" in out and "/SCRIPTS/TELEMETRY/inav.lua" not in h.files, out[-200:]
 
+
+
+def test_old_fork_blocked_suffix():
+    h = Harness({})
+    mode, reason, armed, blocked = h.test.decodeFM("ANGL!")
+    assert (mode, armed, blocked) == ("ANGLE", False, True) and reason, (mode, reason, armed, blocked)
+    mode, reason, armed, blocked = h.test.decodeFM("!GPS")
+    assert blocked and reason == "NO GPS FIX"
+
+TESTS += [test_old_fork_blocked_suffix]
 TESTS += [test_usb_console, test_usb_update, test_usb_update_bad_sum]
 TESTS += [test_edgetx_traps, test_page_keys_via_metatable_globals,
           test_error_trap_shows_message, test_late_sensor_discovery]

@@ -12,6 +12,8 @@ local CFG = {
   useWav = true,         -- false uses tones; missing WAVs also use tones
   debugLog = true,       -- write /LOGS/inav_dbg.txt once a second (for bench debugging)
   usbConsole = true,     -- stream the same lines over USB when the VCP port is set to LUA
+  mspTimeout = 300,      -- 10 ms ticks to wait for an MSP reply (replies share the telemetry downlink)
+  mspGap = 100,          -- 10 ms ticks between MSP requests; backs off to 5 s after 6 misses in a row
 }
 
 local floor, ceil, abs, sqrt = math.floor, math.ceil, math.abs, math.sqrt
@@ -82,7 +84,13 @@ local function decodeFM(s)
   if type(s) ~= "string" or s == "" then return "UNKNOWN", "", false, false end
   local reason = reasonLong[s]
   if reason then return "BLOCKED", reason, false, true end
-  local ready = ssub(s, -1) == "*"
+  local last = ssub(s, -1)
+  -- Older fork builds send "<MODE>!" when arming is blocked, with no reason code.
+  if last == "!" and ssub(s, 1, 1) ~= "!" then
+    local k = ssub(s, 1, -2)
+    return modeLong[k] or k, "ARMING BLOCKED", false, true
+  end
+  local ready = last == "*"
   local key = ready and ssub(s, 1, -2) or s
   local known = modeLong[key]
   return known or key, "", not ready and (known ~= nil or ssub(key,1,1) ~= "!"), false
@@ -131,7 +139,7 @@ local txSeq, reqAt, reqIndex, waiting, lastReply = 0, 0, 0, nil, -100000
 local rx, rxSize, rxCmd, rxSeq, rxStarted = {}, 0, 0, 0, false
 local statusFlags, statusSeen, mspArmed, navMode, navState = 0, false, false, 0, 0
 local mspDistance, mspBearing
-local mspTx, mspRx, mspTimeouts = 0, 0, 0
+local mspTx, mspRx, mspTimeouts, mspMiss = 0, 0, 0, 0
 local verbose, ev = false, nil  -- ev(line) set below
 
 local function encodeRequest(cmd, seq)
@@ -185,7 +193,7 @@ local function receiveChunk(p, now)
   else rxSeq = seq end
   while i <= #p and #rx < rxSize do rx[#rx+1] = p[i]; i = i + 1 end
   if #rx >= rxSize then
-    rxStarted = false; lastReply = now or getTime(); waiting = nil; mspRx = mspRx + 1
+    rxStarted = false; lastReply = now or getTime(); waiting = nil; mspRx = mspRx + 1; mspMiss = 0
     if verbose and ev then ev("MSP RX " .. rxCmd .. " len " .. #rx) end
     parseReply(rxCmd, rx); return true
   end
@@ -198,11 +206,12 @@ local function pollMSP(now)
     if not typ then break end
     if typ == MSP_RESP then receiveChunk(p, now) end
   end
-  if waiting and now - reqAt > 100 then
+  if waiting and now - reqAt > CFG.mspTimeout then
     if ev then ev("MSP TIMEOUT " .. waiting) end
-    waiting = nil; rxStarted = false; mspTimeouts = mspTimeouts + 1
+    waiting = nil; rxStarted = false; mspTimeouts = mspTimeouts + 1; mspMiss = mspMiss + 1
   end
-  if not waiting and now - reqAt >= 50 then
+  local gap = (mspMiss >= 6) and 500 or CFG.mspGap
+  if not waiting and now - reqAt >= gap then
     reqIndex = reqIndex % #commands + 1; sendRequest(commands[reqIndex])
   end
 end
