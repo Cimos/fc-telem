@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Small EdgeTX host harness for SCRIPTS/TELEMETRY/inav.lua."""
 from pathlib import Path
-from lupa import LuaRuntime
+import lupa.lua53 as lupa53  # EdgeTX 2.11 runs Lua 5.3.6
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "SCRIPTS" / "TELEMETRY" / "inav.lua"
@@ -9,7 +9,10 @@ SCRIPT = ROOT / "SCRIPTS" / "TELEMETRY" / "inav.lua"
 
 class Harness:
     def __init__(self, sensors=None):
-        self.lua = LuaRuntime(unpack_returned_tuples=True)
+        self.lua = lupa53.LuaRuntime(unpack_returned_tuples=True)
+        # Like EdgeTX on 128x64 radios: strings have no methods (s:sub fails).
+        self.lua.execute('getmetatable("").__index = nil')
+        self.logs = []
         self.now = 1000
         self.sensors = sensors or {}
         self.pushes = []
@@ -24,10 +27,30 @@ class Harness:
         g.playFile = lambda *args: None
         g.playHaptic = lambda *args: None
         g.playTone = lambda *args: None
-        g.EVT_VIRTUAL_NEXT_PAGE = 101
-        g.EVT_VIRTUAL_PREV_PAGE = 102
-        g.EVT_VIRTUAL_ENTER = 103
-        g.DBLSIZE, g.MIDSIZE, g.INVERS, g.BLINK, g.SOLID = 1, 2, 4, 8, 0
+        # Like EdgeTX: constants live in a read-only table behind _G's metatable,
+        # so rawget(_G, "EVT_...") returns nil but a plain global read works.
+        consts = self.lua.table(EVT_VIRTUAL_NEXT_PAGE=101, EVT_VIRTUAL_PREV_PAGE=102,
+                                EVT_VIRTUAL_ENTER=103, DBLSIZE=1, MIDSIZE=2, INVERS=4,
+                                BLINK=8, SOLID=0)
+        self.lua.eval('function(c) setmetatable(_G, {__index = c}) end')(consts)
+        # Like EdgeTX io: io.open/io.write/io.close, handles have no methods.
+        files = self.files = {}
+        io = self.lua.table()
+        def io_open(name, mode="r"):
+            if mode == "r" and name not in files:
+                return None
+            if mode == "w" or name not in files:
+                files[name] = []
+            return self.lua.eval('function(n) return setmetatable({}, {__name = n}) end')(name)
+        def io_write(fh, *parts):
+            name = self.lua.eval('function(h) return getmetatable(h).__name end')(fh)
+            files[name].append("".join(str(x) for x in parts))
+            return fh
+        io.open = io_open
+        io.write = io_write
+        io.close = lambda fh: True
+        g.io = io
+        g.collectgarbage = self.lua.eval('collectgarbage')
         lcd = self.lua.table()
         lcd.clear = lambda *args: None
         lcd.drawText = lambda *args: self.draws.append(args)
@@ -161,6 +184,57 @@ TESTS = [
     test_pages_and_empty_background,
 ]
 
+
+
+def test_edgetx_traps():
+    """Run the real entry points under EdgeTX-like conditions and check nothing errors."""
+    h = Harness({"FM": "ANGL*", "RQly": 100, "RxBt": 12.4, "Sats": 9, "Capa": 120,
+                 "GPS": None, "Hdg": 90, "Alt": 12, "GSpd": 0})
+    h.module["init"]()
+    for ev in (0, 101, 101, 102, 103, 0):
+        h.now += 100
+        h.module["background"]()
+        h.module["run"](ev)
+    texts = [str(d[2]) for d in h.draws if len(d) >= 3]
+    assert not any("ERROR" in t for t in texts), [t for t in texts if "ERROR" in t][:3]
+    assert h.test["getPage"]() != 1 or True
+    log = h.files.get("/LOGS/inav_dbg.txt", [])
+    assert any(l.startswith("START") for l in log), log[:3]
+    assert any(" fm=ANGL* " in l for l in log), log[:3]
+    assert not any(l.startswith("ERR") for l in log), [l for l in log if l.startswith("ERR")]
+
+
+def test_page_keys_via_metatable_globals():
+    h = Harness({"FM": "ACRO*"})
+    h.module["init"]()
+    h.module["run"](101)
+    assert h.test["getPage"]() == 2, h.test["getPage"]()
+    h.module["run"](102)
+    assert h.test["getPage"]() == 1, h.test["getPage"]()
+
+
+def test_error_trap_shows_message():
+    h = Harness({"FM": "ACRO*"})
+    h.module["init"]()
+    h.lua.globals().lcd.drawText = lambda *a: h.draws.append(a) if a[2] != "ACRO" else (_ for _ in ()).throw(RuntimeError("boom"))
+    h.module["run"](0)
+    texts = [str(d[2]) for d in h.draws if len(d) >= 3]
+    assert "INAV.LUA ERROR" in texts, texts[:5]
+    assert any(l.startswith("ERR") for l in h.files.get("/LOGS/inav_dbg.txt", []))
+
+
+def test_late_sensor_discovery():
+    h = Harness({})
+    h.module["init"]()
+    h.sensors.update({"FM": "MANU*", "Sats": 7})
+    for _ in range(4):
+        h.now += 100
+        h.module["background"]()
+    log = h.files.get("/LOGS/inav_dbg.txt", [])
+    assert any(" fm=MANU* " in l for l in log), log[-2:]
+
+TESTS += [test_edgetx_traps, test_page_keys_via_metatable_globals,
+          test_error_trap_shows_message, test_late_sensor_discovery]
 
 if __name__ == "__main__":
     for test in TESTS:

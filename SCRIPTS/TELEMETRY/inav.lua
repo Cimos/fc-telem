@@ -10,10 +10,13 @@ local CFG = {
   reservePercent = 20,   -- capacity warning threshold
   reserveRepeat = 2000,  -- 20 seconds
   useWav = true,         -- false uses tones; missing WAVs also use tones
+  debugLog = true,       -- write /LOGS/inav_dbg.txt once a second (for bench debugging)
 }
 
 local floor, ceil, abs, sqrt = math.floor, math.ceil, math.abs, math.sqrt
 local sin, cos, pi = math.sin, math.cos, math.pi
+-- EdgeTX on 128x64 radios has no string metatable: s:sub() fails, use ssub(s, ...).
+local ssub = string.sub
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local function band(a, b)
   local r, p = 0, 1
@@ -78,10 +81,10 @@ local function decodeFM(s)
   if type(s) ~= "string" or s == "" then return "UNKNOWN", "", false, false end
   local reason = reasonLong[s]
   if reason then return "BLOCKED", reason, false, true end
-  local ready = s:sub(-1) == "*"
-  local key = ready and s:sub(1, -2) or s
+  local ready = ssub(s, -1) == "*"
+  local key = ready and ssub(s, 1, -2) or s
   local known = modeLong[key]
-  return known or key, "", not ready and (known ~= nil or key:sub(1,1) ~= "!"), false
+  return known or key, "", not ready and (known ~= nil or ssub(key,1,1) ~= "!"), false
 end
 
 local function decodeFlags(flags)
@@ -123,6 +126,7 @@ local txSeq, reqAt, reqIndex, waiting, lastReply = 0, 0, 0, nil, -100000
 local rx, rxSize, rxCmd, rxSeq, rxStarted = {}, 0, 0, 0, false
 local statusFlags, statusSeen, mspArmed, navMode, navState = 0, false, false, 0, 0
 local mspDistance, mspBearing
+local mspTx, mspRx, mspTimeouts = 0, 0, 0
 
 local function encodeRequest(cmd, seq)
   local p = {FC, RADIO}
@@ -139,7 +143,7 @@ end
 local function sendRequest(cmd)
   local p = encodeRequest(cmd, txSeq)
   if crossfireTelemetryPush(MSP_REQ, p) then
-    txSeq = (txSeq + 1) % 16; waiting = cmd; reqAt = getTime()
+    txSeq = (txSeq + 1) % 16; waiting = cmd; reqAt = getTime(); mspTx = mspTx + 1
     rxStarted = false
   end
 end
@@ -174,7 +178,7 @@ local function receiveChunk(p, now)
   else rxSeq = seq end
   while i <= #p and #rx < rxSize do rx[#rx+1] = p[i]; i = i + 1 end
   if #rx >= rxSize then
-    rxStarted = false; lastReply = now or getTime(); waiting = nil
+    rxStarted = false; lastReply = now or getTime(); waiting = nil; mspRx = mspRx + 1
     parseReply(rxCmd, rx); return true
   end
   return false
@@ -186,7 +190,7 @@ local function pollMSP(now)
     if not typ then break end
     if typ == MSP_RESP then receiveChunk(p, now) end
   end
-  if waiting and now - reqAt > 100 then waiting = nil; rxStarted = false end
+  if waiting and now - reqAt > 100 then waiting = nil; rxStarted = false; mspTimeouts = mspTimeouts + 1 end
   if not waiting and now - reqAt >= 50 then
     reqIndex = reqIndex % #commands + 1; sendRequest(commands[reqIndex])
   end
@@ -212,7 +216,7 @@ local function sayMode(m, urgent)
   local played = false
   if CFG.useWav and f and io and io.open then
     local h = io.open("/SOUNDS/en/inav/" .. f .. ".wav", "r")
-    if h then h:close(); playFile("/SOUNDS/en/inav/" .. f .. ".wav"); played = true end
+    if h then io.close(h); playFile("/SOUNDS/en/inav/" .. f .. ".wav"); played = true end
   end
   if not played then tone(urgent and "urgent" or "mode")
   elseif urgent then playHaptic(180,60) end
@@ -297,9 +301,38 @@ local function init()
   lastBg = getTime(); reqAt = lastBg - 50
 end
 
+local lastResolve, lastDump, dumpLines, lastErr = 0, 0, 0, nil
+local function resolveSensors()
+  for i=1,#sensorNames do
+    if not sid[i] then
+      local f = getFieldInfo(sensorNames[i])
+      sid[i] = f and f.id or nil
+    end
+  end
+end
+local function dlog(line)
+  if not CFG.debugLog or not io then return end
+  local f = io.open("/LOGS/inav_dbg.txt", dumpLines > 900 and "w" or "a")
+  if dumpLines > 900 then dumpLines = 0 end
+  if f then io.write(f, line, "\n"); io.close(f); dumpLines = dumpLines + 1 end
+end
+local function S(v) if v == nil then return "-" end return tostring(v) end
+local function dump(now)
+  local g = V("GPS")
+  local gs = type(g) == "table" and (S(g.lat) .. "," .. S(g.lon)) or S(g)
+  dlog(S(now) .. " fm=" .. S(V("FM")) .. " mode=" .. S(mode) .. " arm=" .. S(armed) ..
+    " blk=" .. S(blocked) .. " why=" .. S(reason) .. " sat=" .. S(V("Sats")) ..
+    " lq=" .. S(V("RQly")) .. " rxbt=" .. S(V("RxBt")) .. " capa=" .. S(V("Capa")) ..
+    " gps=" .. gs .. " home=" .. S(homeSet) .. " dist=" .. S(distance) ..
+    " msp=" .. S(mspTx) .. "/" .. S(mspRx) .. "/" .. S(mspTimeouts) ..
+    " flags=" .. S(statusFlags) .. " nav=" .. S(navMode) .. "/" .. S(navState) ..
+    " page=" .. S(page) .. " mem=" .. S(math.floor(collectgarbage("count"))))
+end
 local function background()
   local now = getTime()
+  if now - lastResolve >= 200 then resolveSensors(); lastResolve = now end
   readSensors(); pollMSP(now); updateState(now); doAlerts(now); lastBg = now
+  if CFG.debugLog and now - lastDump >= 100 then dump(now); lastDump = now end
 end
 
 -- Display -------------------------------------------------------------------
@@ -377,9 +410,9 @@ end
 
 local function run(event)
   background()
-  local nextPage = rawget(_G,"EVT_VIRTUAL_NEXT_PAGE")
-  local prevPage = rawget(_G,"EVT_VIRTUAL_PREV_PAGE")
-  local enter = rawget(_G,"EVT_VIRTUAL_ENTER") or rawget(_G,"EVT_ENTER_BREAK") or rawget(_G,"EVT_ENTER_FIRST")
+  local nextPage = EVT_VIRTUAL_NEXT_PAGE
+  local prevPage = EVT_VIRTUAL_PREV_PAGE
+  local enter = EVT_VIRTUAL_ENTER or EVT_ENTER_BREAK
   if event and (event==nextPage or event==enter) then page=page%3+1
   elseif event and event==prevPage then page=(page+1)%3+1 end
   lcd.clear()
@@ -387,7 +420,23 @@ local function run(event)
   return 0
 end
 
-return {init=init,run=run,background=background,
+local function trap(fn, arg)
+  local ok, e = pcall(fn, arg)
+  if not ok and e ~= lastErr then lastErr = e; dlog("ERR " .. tostring(e)) end
+  return ok
+end
+local function safeRun(event)
+  if not trap(run, event) then
+    lcd.clear(); lcd.drawText(0, 0, "INAV.LUA ERROR", INVERS or 0)
+    local m = tostring(lastErr or "?")
+    for i = 0, 5 do lcd.drawText(0, 9 + i * 9, ssub(m, i * 21 + 1, i * 21 + 21), 0) end
+  end
+  return 0
+end
+local function safeBg() trap(background) end
+local function safeInit() trap(init); dlog("START " .. tostring(getTime())) end
+
+return {init=safeInit,run=safeRun,background=safeBg,
   _test={decodeFM=decodeFM,encodeRequest=encodeRequest,receiveChunk=receiveChunk,
     decodeFlags=decodeFlags,homeMath=homeMath,cellCount=cellCount,getPage=function() return page end,
     getReply=function() return rxCmd,rx end,

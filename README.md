@@ -39,3 +39,20 @@ Missing files are harmless and fall back to a tone. RTH and failsafe also use ha
 ## Boxer memory
 
 The script keeps one sensor table, one small MSP receive buffer, and fixed lookup tables. It avoids per-frame table construction in the normal update path. Do not add large bitmaps or debug logging on the Boxer; both consume scarce Lua RAM.
+
+## Bench debugging
+
+`CFG.debugLog = true` makes the script append one status line per second to
+`/LOGS/inav_dbg.txt` on the radio's SD card: raw FM string, decoded mode and arming
+reason, sats, LQ, RxBt, capacity, GPS, home, MSP requests/replies/timeouts, arming
+flags, nav state, page and Lua memory. Any Lua error is caught, shown on screen with
+its message, and written to the log as an `ERR` line instead of killing the script.
+The log restarts after about 15 minutes of lines.
+
+Loop: fly or bench with the radio, plug the radio into the PC, choose USB Storage,
+then run `tools/sync.sh`. It pulls the log into `debug/` (not committed), pushes the
+current script, clears the log, and prints any errors plus the last lines.
+
+The host tests run under Lua 5.3 like EdgeTX 2.11 and mimic its quirks on 128x64
+radios: no string methods (`s:sub()` fails), constants only reachable as plain
+globals, and file handles without methods.
