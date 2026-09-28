@@ -80,6 +80,7 @@ local FC, RADIO = 0xC8, 0xEA
 local txSeq, reqAt, reqIndex, waiting, lastReply = 0, 0, 0, nil, -100000
 local rx, rxSize, rxCmd, rxSeq, rxStarted = {}, 0, 0, 0, false
 local statusFlags, statusSeen, mspArmed, navMode, navState = 0, false, false, 0, 0
+local autotune, spokenAT = nil, nil   -- nil until the profile reports it
 local mspDistance, mspBearing, mspReason
 local mspTx, mspRx, mspTimeouts, mspMiss = 0, 0, 0, 0
 local verbose, ev = false, nil  -- ev(line) set below
@@ -94,7 +95,7 @@ local function loadProfile(key, source, detectedName)
   if not ok or type(p)~="table" then if ev then ev("PROFILE LOAD ERROR "..key) end return false end
   profile=p; profileKey=key; profileSource=source
   reqIndex,waiting,rxStarted,statusSeen,mspDistance,mspBearing=0,nil,false,false,nil,nil
-  mspReason=nil
+  mspReason=nil; autotune, spokenAT = nil, nil
   if detectedName and ev then ev("DETECT "..detectedName.." -> "..key) end
   if ev then ev("PROFILE "..key.." ("..source..")") end
   return true
@@ -171,6 +172,7 @@ local function parseReply(cmd, b)
   if r.navMode~=nil then navMode=r.navMode end
   if r.navState~=nil then navState=r.navState end
   if r.reason~=nil then mspReason=r.reason end
+  if r.autotune~=nil then autotune=r.autotune end
 end
 
 local function receiveChunk(p, now)
@@ -229,6 +231,12 @@ local function tone(kind)
   if kind == "urgent" then playTone(1200,180,40); playHaptic(180,60)
   elseif kind == "warn" then playTone(850,140,30)
   else playTone(1800,100,20) end
+end
+local function sayClip(f)
+  if ev then ev("SAY " .. f) end
+  local path = "/SOUNDS/en/fctel/" .. f .. ".wav"
+  local h = CFG.useWav and io and io.open(path, "r")
+  if h then io.close(h); playFile(path) else tone("mode") end
 end
 local function sayMode(m, urgent)
   local f = profile and profile.voice[m]
@@ -309,6 +317,15 @@ local function doAlerts(now)
       sayMode(m, armed and (m == "RTH" or m == "FAILSAFE")); spokenMode = m
     end
   end
+  -- Autotune on: say "autotune". Off: say the flight mode again so you know
+  -- what you are flying in. Skips the first report so power-up is quiet.
+  if autotune ~= nil and autotune ~= spokenAT then
+    if spokenAT ~= nil and (CFG.sayModes or armed) then
+      if autotune then sayClip("autotune") else sayMode(mode) end
+    end
+    if ev then ev("AUTOTUNE " .. tostring(autotune)) end
+    spokenAT = autotune
+  end
   if not armed and blocked and reason ~= lastReason and now-lastRefused >= 500 then
     tone("urgent"); lastRefused = now
   end
@@ -358,7 +375,7 @@ local function dump(now)
     " lq=" .. S(V("RQly")) .. " rxbt=" .. S(V("RxBt")) .. " capa=" .. S(V("Capa")) ..
     " gps=" .. gs .. " home=" .. S(homeSet) .. " dist=" .. S(distance) ..
     " msp=" .. S(mspTx) .. "/" .. S(mspRx) .. "/" .. S(mspTimeouts) ..
-    " flags=" .. S(statusFlags) .. " nav=" .. S(navMode) .. "/" .. S(navState) ..
+    " flags=" .. S(statusFlags) .. " nav=" .. S(navMode) .. "/" .. S(navState) .. " at=" .. S(autotune) ..
     " page=" .. S(page) .. " mem=" .. S(math.floor(collectgarbage("count"))))
 end
 ev = function(line) dlog("EV " .. S(getTime()) .. " " .. line) end
@@ -502,8 +519,9 @@ local function activeWarning()
 end
 
 local function drawMain(now)
-  local mf = (#mode > 10) and MID or DBL
-  txt(0,0,mode,mf); txt(78,0,num(V("RxBt"),true).."V"); txt(112,0,profile and profile.name or "--")
+  local shown = autotune and (mode .. "+AT") or mode
+  local mf = (#shown > 10) and MID or DBL
+  txt(0,0,shown,mf); txt(78,0,num(V("RxBt"),true).."V"); txt(112,0,profile and profile.name or "--")
   txt(96,7,num(V("Curr"),true).."A")
   txt(0,16,armed==true and "ARMED" or (blocked and "BLOCKED" or (armed==nil and "--" or "READY")),armed==true and INVERS or Z)
   txt(48,16,"SAT "..num(V("Sats"))..((V("Sats") or 0)>=6 and "+" or "-")); txt(96,16,"LQ"..num(V("RQly")))

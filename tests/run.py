@@ -416,6 +416,45 @@ def test_usb_update_times_out():
 TESTS += [test_usb_update_times_out]
 
 
+def inav_status(h, boxbits):
+    """MSP2_INAV_STATUS reply: 9-byte header, u32 arming flags, then box bits."""
+    payload = [0] * 9 + [0, 0, 0, 0] + [0] * 8 + [0]
+    for bit in boxbits:
+        payload[13 + bit // 8] |= 1 << (bit % 8)
+    return 0x7B, h.lua.table_from([0xEA, 0xC8, 0x50, 0, 0x00, 0x20, len(payload), 0] + payload)
+
+
+def test_inav_autotune_voice():
+    h = Harness({"FM": "ANGL*", "RQly": 100}, profile="inav")
+    played = []
+    wrap = h.lua.eval('function(f) return function(...) return f(...) end end')
+    h.lua.globals().playFile = wrap(lambda p: played.append(str(p)))
+    for c in ("autotune", "fbwa"):
+        h.files[f"/SOUNDS/en/fctel/{c}.wav"] = ["x"]
+    h.module.init()
+    def tick(n=1):
+        for _ in range(n):
+            h.now += 10; h.module.background()
+    tick(6)                                          # ANGLE spoken as FBWA
+    # MSP_BOXIDS: permanent ids in active order; AUTO TUNE (21) is 4th -> bit 3.
+    h.pops.append(msp_v1_response(h, 119, [0, 1, 3, 21, 8, 10]))
+    tick()
+    assert 119 not in [x for x in lua_list(h.test.getProfileTable().msp)], "119 should be dropped"
+    h.pops.append(inav_status(h, [0])); tick()      # first report: autotune off, silent
+    before = list(played)
+    h.pops.append(inav_status(h, [0, 3])); tick()   # autotune on
+    assert played[len(before):] == ["/SOUNDS/en/fctel/autotune.wav"], played
+    texts = []
+    h.lua.globals().lcd.drawText = wrap(lambda *a: texts.append(str(a[2])))
+    h.module.run(0)
+    assert "ANGLE+AT" in texts, texts[:5]
+    h.pops.append(inav_status(h, [0])); tick()      # off: the mode is said again
+    assert played[-1] == "/SOUNDS/en/fctel/fbwa.wav", played
+    assert "AUTOTUNE false" in "".join(h.serial_out)
+
+TESTS += [test_inav_autotune_voice]
+
+
 def test_device_info_detection_and_origin_filter():
     cases = [("INAV 9.1.1: JBF7", "inav"), ("Betaflight: JBF7", "bf"),
              ("BTFL", "bf"), ("ArduPlane V4.6.0", "ap"),

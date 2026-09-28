@@ -1,7 +1,7 @@
 -- Profile interface: name is the screen tag; decodeFM(s) returns mode, reason,
 -- armed (boolean or nil), blocked; msp is the command-id poll list;
 -- parseReply(cmd, bytes) returns any of flags, reason, armed, distance, bearing,
--- navMode, navState; navModes is a set of display names; voice maps every
+-- navMode, navState, autotune; navModes is a set of display names; voice maps every
 -- reported display name to a lowercase, no-space clip basename.
 local floor = math.floor
 local ssub = string.sub
@@ -35,6 +35,17 @@ local flagReasons={{7,"FAILSAFE"},{16,"FAILSAFE"},{18,"NO RC LINK"},{15,"HARDWAR
   {11,"NAV UNSAFE"},{6,"GEOZONE"},{19,"THROTTLE HIGH"},{23,"STICKS OFF CENTRE"},
   {24,"AUTOTRIM"},{28,"NO PREARM"},{29,"DSHOT BEEPER"},{30,"LANDED"}}
 local navName=nil
+-- AUTO TUNE is a modifier, so it never shows in the flight-mode string. INAV's
+-- status reply carries one bit per active mode, in the order MSP_BOXIDS (119)
+-- lists them. Ask for that order once, remember AUTO TUNE's slot (permanent
+-- id 21), then drop 119 from the poll list.
+local msp={119,0x2000,107,121}
+local atBit=nil
+local function dropBoxIds()
+  local j=0
+  for i=1,#msp do if msp[i]~=119 then j=j+1; msp[j]=msp[i] end end
+  for i=#msp,j+1,-1 do msp[i]=nil end
+end
 local function flagText(flags)
   local out,n,last="",0,nil
   for i=1,#flagReasons do
@@ -57,8 +68,17 @@ local function decodeFM(s)
   return navName or m or k,"",not ready and (m~=nil or ssub(k,1,1)~="!"),false
 end
 local function parseReply(cmd,b)
-  if cmd==0x2000 and #b>=13 then
-    local f=u32(b,10); return {flags=f,reason=flagText(f),armed=has(f,2)}
+  if cmd==119 then
+    for i=1,#b do if b[i]==21 then atBit=i-1; break end end
+    dropBoxIds(); return {}
+  elseif cmd==0x2000 and #b>=13 then
+    local f=u32(b,10); local r={flags=f,reason=flagText(f),armed=has(f,2)}
+    -- Box bits start after the 13-byte header (byte 14 onward).
+    if atBit then
+      local byte=b[14+floor(atBit/8)]
+      if byte then r.autotune=has(byte,atBit%8) end
+    end
+    return r
   elseif cmd==107 and #b>=4 then return {distance=u16(b,1),bearing=u16(b,3)}
   elseif cmd==121 and #b>=2 then
     local n,s=b[1] or 0,b[2] or 0
@@ -67,7 +87,7 @@ local function parseReply(cmd,b)
   end
   return {}
 end
-return {name="INAV",decodeFM=decodeFM,msp={0x2000,107,121},parseReply=parseReply,
+return {name="INAV",decodeFM=decodeFM,msp=msp,parseReply=parseReply,
   navModes={["ALT HOLD"]=true,CRUISE=true,["COURSE HOLD"]=true,LOITER=true,
     ["POS HOLD"]=true,WAYPOINT=true,RTH=true,["WP RTH"]=true,LANDING=true},
   voice={ACRO="acro",ANGLE="angle",HORIZON="horizon",["ANGLE HOLD"]="anglehold",
