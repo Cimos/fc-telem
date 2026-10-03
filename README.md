@@ -101,3 +101,7 @@ Run `./.venv/bin/python tests/run.py`. The Lua 5.3 harness models EdgeTX 2.11 on
 `debug` libraries, plain-global constants, and methodless file handles. It also
 prints desktop-runtime memory for the core plus each selected profile; those
 numbers are comparative and are not a hardware RAM measurement.
+
+## Licence
+
+GPL-3.0. See `LICENSE`.
